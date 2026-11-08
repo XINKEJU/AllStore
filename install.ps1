@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 $installDir = Join-Path $env:LOCALAPPDATA "MindosShop"
 $target = Join-Path $installDir "mindosshop.exe"
 
-if (-not (Test-Path $Exe)) { throw "找不到构建产物: $Exe" }
+if (-not (Test-Path $Exe)) { throw "Build output not found: $Exe" }
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 Copy-Item -LiteralPath $Exe -Destination $target -Force
 
@@ -21,11 +21,11 @@ if (-not $NoShortcut) {
         $sc = $shell.CreateShortcut($link)
         $sc.TargetPath = $target
         $sc.WorkingDirectory = $installDir
-        $sc.Description = "MindosShop - 纯净原生应用商店"
+        $sc.Description = "MindosShop - pure native app store"
         $sc.IconLocation = "$target,0"
         $sc.Save()
     } catch {
-        Write-Warning "COM 快捷方式创建失败，回退为 .url 快捷方式: $_"
+        Write-Warning "COM shortcut failed, falling back to .url: $_"
         $urlLink = Join-Path $startMenu "MindosShop.url"
         $fileUrl = "file:///" + ($target -replace "\\", "/")
         Set-Content -Path $urlLink -Value "[InternetShortcut]`r`nURL=$fileUrl`r`nIconIndex=0" -Encoding ASCII
@@ -47,15 +47,18 @@ Set-ItemProperty -Path $reg -Name "NoRepair" -Value 1 -Type DWord
 
 $uninstall = @'
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$lnk = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\MindosShop.lnk"
-if (Test-Path $lnk) { Remove-Item $lnk -Force }
+$programs = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs"
+foreach ($n in @("MindosShop.lnk", "MindosShop.url")) {
+    $f = Join-Path $programs $n
+    if (Test-Path $f) { Remove-Item $f -Force }
+}
 Remove-Item "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MindosShop" -Recurse -Force -ErrorAction SilentlyContinue
 Get-Process mindosshop -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
 '@
 Set-Content -Path (Join-Path $installDir "uninstall.ps1") -Value $uninstall -Encoding UTF8
 
-Write-Host "已安装: $target"
-Write-Host "体积: $([math]::Round((Get-Item $target).Length / 1KB, 1)) KB"
-Write-Host "开始菜单: $link"
-Write-Host "卸载: 设置 - 应用 - MindosShop（或运行 $installDir\uninstall.ps1）"
+Write-Host "Installed: $target"
+Write-Host "Size: $([math]::Round((Get-Item $target).Length / 1KB, 1)) KB"
+Write-Host "Start menu: $link"
+Write-Host "Uninstall: Settings > Apps > MindosShop, or run $installDir\uninstall.ps1"

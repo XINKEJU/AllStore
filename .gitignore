@@ -1,0 +1,15 @@
+/target/
+/evidence/
+/tools/
+/dist/
+*.py
+*.pyc
+*.log
+*.pdb
+*.exe
+*.dll
+*.pml
+*.csv
+real-identity.json
+*identity*.json
+node_modules/

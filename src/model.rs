@@ -38,10 +38,10 @@ impl App {
     }
     pub fn download_url(&self) -> String {
         for u in [&self.dl_a, &self.dl_b] {
-            if let Some(s) = u {
-                if s.starts_with("http") {
-                    return s.clone();
-                }
+            if let Some(s) = u
+                && s.starts_with("http")
+            {
+                return s.clone();
             }
         }
         format!("{}/dlservice/download?softid={}", BASE, self.id)
@@ -54,19 +54,23 @@ impl App {
         }
     }
     pub fn subtitle(&self) -> String {
-        self.introduction.as_deref().unwrap_or("").trim().to_string()
+        self.introduction
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_string()
     }
     pub fn meta(&self) -> String {
         let mut v = Vec::new();
-        if let Some(s) = &self.size {
-            if !s.trim().is_empty() {
-                v.push(s.trim().to_string());
-            }
+        if let Some(s) = &self.size
+            && !s.trim().is_empty()
+        {
+            v.push(s.trim().to_string());
         }
-        if let Some(s) = &self.downloads {
-            if !s.trim().is_empty() {
-                v.push(format!("{} 安装", s.trim()));
-            }
+        if let Some(s) = &self.downloads
+            && !s.trim().is_empty()
+        {
+            v.push(format!("{} 安装", s.trim()));
         }
         // Keep the card meta to one line; the full version lives in details.
         v.join("  ·  ")
@@ -85,29 +89,56 @@ pub struct ClassItem {
 pub struct ClassGroup {
     #[serde(default)]
     pub code: String,
-    #[serde(default)]
-    pub name: String,
     #[serde(rename = "appClassList", default)]
     pub list: Vec<ClassItem>,
 }
 
-#[allow(dead_code)]
+/// The details endpoint mixes scalars and objects: `developer` is `{}` or an
+/// object (never a string), `score` may be a number or a string. Typing them
+/// as `Value` keeps deserialization from failing on every single app — which
+/// previously made the long description silently fall back to the one-liner.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Detail {
-    #[serde(rename = "softID", default)]
-    pub id: String,
-    #[serde(rename = "softName", default)]
-    pub name: String,
     #[serde(rename = "detailInfo", default)]
     pub detail_info: Option<String>,
     #[serde(rename = "whatNew", default)]
     pub what_new: Option<String>,
     #[serde(default)]
-    pub developer: Option<String>,
+    pub developer: Option<serde_json::Value>,
     #[serde(rename = "downloadUrl", default)]
     pub download_url: Option<String>,
-    #[serde(rename = "logoFile", default)]
-    pub logo: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(rename = "installFileSize", default)]
+    pub size: Option<String>,
+    #[serde(rename = "downloadCount", default)]
+    pub downloads: Option<String>,
+    #[serde(default)]
+    pub score: Option<serde_json::Value>,
+}
+
+impl Detail {
+    pub fn developer_name(&self) -> String {
+        match &self.developer {
+            Some(serde_json::Value::String(s)) => s.trim().to_string(),
+            Some(serde_json::Value::Object(m)) => m
+                .get("name")
+                .or_else(|| m.get("developerName"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+            _ => String::new(),
+        }
+    }
+
+    pub fn score_text(&self) -> String {
+        match &self.score {
+            Some(serde_json::Value::String(s)) => s.trim().to_string(),
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            _ => String::new(),
+        }
+    }
 }
 
 pub struct Payload {
@@ -116,10 +147,18 @@ pub struct Payload {
 }
 
 pub fn payload(bytes: &[u8]) -> Result<Payload, String> {
-    let v: serde_json::Value =
-        serde_json::from_slice(bytes).map_err(|e| format!("JSON: {}", e))?;
+    let v: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("JSON: {}", e))?;
+    // Some endpoints return `status` as a string ("0"); both forms are legal.
+    let status = v
+        .get("status")
+        .and_then(|x| match x {
+            serde_json::Value::Number(n) => n.as_i64(),
+            serde_json::Value::String(s) => s.trim().parse::<i64>().ok(),
+            _ => None,
+        })
+        .unwrap_or(-1) as i32;
     Ok(Payload {
-        status: v.get("status").and_then(|x| x.as_i64()).unwrap_or(-1) as i32,
+        status,
         data: v.get("data").cloned().unwrap_or(serde_json::Value::Null),
     })
 }
@@ -149,16 +188,17 @@ pub fn parse_apps(data: &serde_json::Value) -> Vec<App> {
         let is_ad = match o.get("isAdvert") {
             Some(serde_json::Value::Bool(b)) => Some(*b),
             Some(serde_json::Value::Number(n)) => Some(n.as_i64().unwrap_or(0) != 0),
-            Some(serde_json::Value::String(s)) => {
-                Some(s == "1" || s.eq_ignore_ascii_case("true"))
-            }
+            Some(serde_json::Value::String(s)) => Some(s == "1" || s.eq_ignore_ascii_case("true")),
             _ => None,
         };
         let a = App {
             id: text("softID").unwrap_or_default(),
             name: text("softName").unwrap_or_default(),
             introduction: text("introduction"),
-            version: text("version"),
+            version: text("version")
+                .or_else(|| text("softVersion"))
+                .or_else(|| text("versionName"))
+                .or_else(|| text("appVersion")),
             size: text("installFileSize"),
             downloads: text("downloadCount"),
             score: o.get("score").cloned(),
@@ -197,4 +237,43 @@ pub fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: the real API returns `developer: {}` and a numeric `score`.
+    /// The old `Option<String>` field made every details request fail, so the
+    /// long description never reached the detail page.
+    #[test]
+    fn detail_parses_real_api_shape() {
+        let v = serde_json::json!({
+            "softID": "L120416",
+            "softName": "千问",
+            "version": "5.1.5.294",
+            "installFileSize": "286.62 MB",
+            "downloadCount": "272万次",
+            "score": 64,
+            "developer": {},
+            "detailInfo": "第一行\n第二行",
+            "whatNew": "优化体验",
+            "downloadUrl": "https://pc-store.lenovomm.cn/dlservice/download?softid=L120416",
+            "captureFileList": [{"type": "1", "url": "https://example.com/a.png"}]
+        });
+        let d: Detail = serde_json::from_value(v).expect("details must deserialize");
+        assert_eq!(d.detail_info.as_deref(), Some("第一行\n第二行"));
+        assert_eq!(d.version.as_deref(), Some("5.1.5.294"));
+        assert_eq!(d.score_text(), "64");
+        assert!(d.developer_name().is_empty());
+        assert_eq!(d.what_new.as_deref(), Some("优化体验"));
+    }
+
+    #[test]
+    fn payload_accepts_numeric_and_string_status() {
+        let p = payload(br#"{"status":0,"data":{"apps":[]}}"#).unwrap();
+        assert_eq!(p.status, 0);
+        let q = payload(br#"{"status":"0","data":null}"#).unwrap();
+        assert_eq!(q.status, 0, "string status must be accepted");
+    }
 }

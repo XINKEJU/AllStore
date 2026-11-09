@@ -5,18 +5,21 @@
 
 mod app;
 mod gfx;
+mod installed;
 mod model;
 mod net;
+mod update;
+mod updates_ui;
 
 use std::ffi::c_void;
 
-use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::UpdateWindow;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::{HSTRING, PCWSTR, w};
 
 #[link(name = "user32")]
 unsafe extern "system" {
@@ -115,7 +118,13 @@ fn main() {
         app::start_load(hwnd.0 as usize);
 
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+        loop {
+            // -1 means GetMessage failed rather than WM_QUIT; spinning on a
+            // stale MSG would peg a core at 100%.
+            let r = GetMessageW(&mut msg, None, 0, 0);
+            if r.0 <= 0 {
+                break;
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }

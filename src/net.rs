@@ -1,22 +1,39 @@
 //! WinHTTP transport. Uses the system TLS store and the system proxy settings,
 //! so no third-party TLS stack or proxy configuration is needed.
+//!
+//! The store's download endpoint answers with a 302 to a plain-HTTP CDN host.
+//! WinHTTP refuses that downgrade by default, so redirects are handled here
+//! explicitly: status codes and Content-Length are checked, and identity
+//! headers are never forwarded to a redirect target.
 use std::ffi::c_void;
 use std::io::Write;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Networking::WinHttp::*;
+use windows::core::{HSTRING, PCWSTR};
 
-use crate::model::{self, App, ClassGroup, Detail, BASE, CH};
+use crate::model::{self, App, BASE, CH, ClassGroup, Detail};
 
-/// Local diagnostic log (never transmitted anywhere).
+/// Local diagnostic log (never transmitted anywhere). Bounded so a long
+/// session cannot grow it without limit; response bodies are never logged.
 pub fn log(msg: &str) {
     let dir = std::env::var("TEMP").unwrap_or_else(|_| ".".into());
+    let path = format!("{}\\mindosshop.log", dir);
+    if let Ok(md) = std::fs::metadata(&path)
+        && md.len() > 1_048_576
+    {
+        let _ = std::fs::remove_file(&path);
+    }
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(format!("{}\\mindosshop.log", dir))
+        .open(&path)
     {
-        let _ = writeln!(f, "{}", msg);
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "{} {}", ts, msg);
     }
 }
 
@@ -30,6 +47,7 @@ fn hs(s: &str) -> HSTRING {
     HSTRING::from(s)
 }
 
+#[derive(Clone)]
 struct UrlParts {
     host: String,
     path: String,
@@ -43,61 +61,180 @@ fn split_url(url: &str) -> Result<UrlParts, String> {
     } else if let Some(r) = url.strip_prefix("http://") {
         (false, r)
     } else {
-        return Err(format!("unsupported url: {}", url));
+        return Err(format!("不支持的链接协议：{}", &url[..url.len().min(48)]));
     };
+    let rest = rest.split('#').next().unwrap_or(rest);
     let (authority, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
     };
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(if secure { 443 } else { 80 })),
-        None => (authority.to_string(), if secure { 443 } else { 80 }),
+    let default_port = if secure { 443 } else { 80 };
+    let (host, port) = if let Some(inner) = authority.strip_prefix('[') {
+        let Some(end) = inner.find(']') else {
+            return Err("链接中的 IPv6 地址格式错误".into());
+        };
+        let h = inner[..end].to_string();
+        let p = inner[end + 1..]
+            .strip_prefix(':')
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(default_port);
+        (h, p)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(default_port)),
+            None => (authority.to_string(), default_port),
+        }
     };
-    Ok(UrlParts { host, path: path.to_string(), port, secure })
+    if host.is_empty() {
+        return Err("链接缺少主机名".into());
+    }
+    // CDN object names occasionally contain spaces; WinHTTP wants them encoded.
+    let path = path.replace(' ', "%20");
+    Ok(UrlParts {
+        host,
+        path,
+        port,
+        secure,
+    })
 }
 
-/// Perform one request. `sink`, when provided, receives body chunks as they
-/// arrive (used for streaming downloads); otherwise the body is returned.
-pub fn http(
+/// Turn a Location header into an absolute URL, including protocol-relative,
+/// root-relative and path-relative forms.
+fn resolve_location(base: &str, loc: &str) -> String {
+    let loc = loc.trim();
+    if loc.starts_with("http://") || loc.starts_with("https://") {
+        return loc.to_string();
+    }
+    let Some(scheme_end) = base.find("://").map(|i| i + 3) else {
+        return loc.to_string();
+    };
+    let authority_end = base[scheme_end..]
+        .find('/')
+        .map(|i| scheme_end + i)
+        .unwrap_or(base.len());
+    let origin = &base[..authority_end];
+    if let Some(rest) = loc.strip_prefix("//") {
+        return format!("{}{}", &base[..scheme_end], rest);
+    }
+    if loc.starts_with('/') {
+        return format!("{}{}", origin, loc);
+    }
+    let path = &base[authority_end..];
+    let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    format!("{}{}/{}", origin, dir, loc)
+}
+
+/// Close every WinHTTP handle even when an early `?` returns.
+struct Handles(Vec<*mut c_void>);
+
+impl Handles {
+    fn new() -> Self {
+        Self(Vec::with_capacity(3))
+    }
+    fn add(&mut self, h: *mut c_void) -> Result<*mut c_void, String> {
+        if h.is_null() {
+            return Err("WinHTTP 句柄创建失败".into());
+        }
+        self.0.push(h);
+        Ok(h)
+    }
+}
+
+impl Drop for Handles {
+    fn drop(&mut self) {
+        unsafe {
+            for &h in self.0.iter().rev() {
+                WinHttpCloseHandle(h).ok();
+            }
+        }
+    }
+}
+
+fn query_status(request: *mut c_void) -> u32 {
+    unsafe {
+        let mut code = 0u32;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        let mut index = 0u32;
+        let ok = WinHttpQueryHeaders(
+            request,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            PCWSTR::null(),
+            Some(&mut code as *mut u32 as *mut c_void),
+            &mut size,
+            &mut index,
+        )
+        .is_ok();
+        if ok { code } else { 0 }
+    }
+}
+
+fn query_header(request: *mut c_void, info: u32) -> Option<String> {
+    unsafe {
+        let mut size = 0u32;
+        let mut index = 0u32;
+        // The first call is expected to report ERROR_INSUFFICIENT_BUFFER and
+        // fill in the required byte count.
+        let _ = WinHttpQueryHeaders(request, info, PCWSTR::null(), None, &mut size, &mut index);
+        if size == 0 || size > 64 * 1024 {
+            return None;
+        }
+        let mut buf = vec![0u16; (size as usize / 2) + 1];
+        let mut index = 0u32;
+        let ok = WinHttpQueryHeaders(
+            request,
+            info,
+            PCWSTR::null(),
+            Some(buf.as_mut_ptr() as *mut c_void),
+            &mut size,
+            &mut index,
+        )
+        .is_ok();
+        if !ok {
+            return None;
+        }
+        let n = (size as usize / 2).min(buf.len());
+        let s = String::from_utf16_lossy(&buf[..n]);
+        let s = s.trim_end_matches('\0').trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    }
+}
+
+type Sink<'a> = Option<&'a mut dyn FnMut(&[u8]) -> bool>;
+
+struct OneResp {
+    status: u32,
+    location: Option<String>,
+    content_length: Option<u64>,
+    bytes: Vec<u8>,
+    total: u64,
+}
+
+/// A single HTTP round trip. Redirect bodies are discarded; only a final 2xx
+/// response is streamed into `sink`.
+fn one(
     method: &str,
     url: &str,
     headers: &[(&str, String)],
     body: Option<&[u8]>,
-    mut sink: Option<&mut dyn FnMut(&[u8])>,
-) -> Result<Vec<u8>, String> {
+    sink: &mut Sink<'_>,
+) -> Result<OneResp, String> {
     unsafe {
-        let u = match split_url(url) {
-            Ok(v) => v,
-            Err(e) => {
-                log(&format!("BADURL {}", e));
-                return Err(e);
-            }
-        };
-        log(&format!("REQ {} {}:{}{} hdrs={}", method, u.host, u.port, u.path, headers.len()));
-
-        let session = WinHttpOpen(
+        let u = split_url(url)?;
+        let mut handles = Handles::new();
+        let session = handles.add(WinHttpOpen(
             &hs("MindosShop/1.0"),
             WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
             PCWSTR::null(),
             PCWSTR::null(),
             0,
-        );
-        if session.is_null() {
-            log("FAIL WinHttpOpen");
-            return Err("WinHttpOpen failed".into());
-        }
-        let connect = WinHttpConnect(session, &hs(&u.host), u.port, 0);
-        if connect.is_null() {
-            log("FAIL WinHttpConnect");
-            WinHttpCloseHandle(session).ok();
-            return Err("WinHttpConnect failed".into());
-        }
+        ))?;
+        let connect = handles.add(WinHttpConnect(session, &hs(&u.host), u.port, 0))?;
         let flags = if u.secure {
             WINHTTP_FLAG_SECURE
         } else {
             WINHTTP_OPEN_REQUEST_FLAGS(0)
         };
-        let request = WinHttpOpenRequest(
+        let request = handles.add(WinHttpOpenRequest(
             connect,
             &hs(method),
             &hs(&u.path),
@@ -105,14 +242,17 @@ pub fn http(
             PCWSTR::null(),
             std::ptr::null(),
             flags,
+        ))?;
+
+        // We follow redirects ourselves so HTTPS -> HTTP CDN hops are allowed
+        // and identity headers never leak to a third-party host.
+        let policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+        let _ = WinHttpSetOption(
+            Some(request as *const c_void),
+            WINHTTP_OPTION_REDIRECT_POLICY,
+            Some(&policy.to_ne_bytes()),
         );
-        if request.is_null() {
-            log("FAIL WinHttpOpenRequest");
-            WinHttpCloseHandle(connect).ok();
-            WinHttpCloseHandle(session).ok();
-            return Err("WinHttpOpenRequest failed".into());
-        }
-        let _ = WinHttpSetTimeouts(request, 8000, 10000, 10000, 30000);
+        let _ = WinHttpSetTimeouts(request, 10000, 15000, 15000, 60000);
 
         let mut hdr = String::new();
         for (k, v) in headers {
@@ -132,61 +272,159 @@ pub fn http(
             Some(b) => (Some(b.as_ptr() as *const c_void), b.len() as u32),
             None => (None, 0),
         };
-        if let Err(e) = WinHttpSendRequest(request, None, ptr, len, len, 0) {
-            log(&format!("FAIL WinHttpSendRequest {}", e));
-            WinHttpCloseHandle(request).ok();
-            WinHttpCloseHandle(connect).ok();
-            WinHttpCloseHandle(session).ok();
-            return Err(format!("WinHttpSendRequest: {}", e));
-        }
-        if let Err(e) = WinHttpReceiveResponse(request, std::ptr::null_mut()) {
-            log(&format!("FAIL WinHttpReceiveResponse {}", e));
-            WinHttpCloseHandle(request).ok();
-            WinHttpCloseHandle(connect).ok();
-            WinHttpCloseHandle(session).ok();
-            return Err(format!("WinHttpReceiveResponse: {}", e));
-        }
+        WinHttpSendRequest(request, None, ptr, len, len, 0)
+            .map_err(|e| format!("发送请求失败：{}", e))?;
+        WinHttpReceiveResponse(request, std::ptr::null_mut())
+            .map_err(|e| format!("接收响应失败：{}", e))?;
 
-        let mut result = Vec::new();
+        let status = query_status(request);
+        let content_length = query_header(request, WINHTTP_QUERY_CONTENT_LENGTH)
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        if (300..400).contains(&status) {
+            return Ok(OneResp {
+                status,
+                location: query_header(request, WINHTTP_QUERY_LOCATION),
+                content_length,
+                bytes: Vec::new(),
+                total: 0,
+            });
+        }
+        let success = (200..300).contains(&status);
+
+        let mut bytes = Vec::new();
+        let mut total = 0u64;
         loop {
             let mut available = 0u32;
-            match WinHttpQueryDataAvailable(request, &mut available) {
-                Ok(()) if available > 0 => {}
-                Ok(()) => break,
-                Err(e) => {
-                    log(&format!("WARN QueryDataAvailable {}", e));
-                    break;
-                }
+            WinHttpQueryDataAvailable(request, &mut available)
+                .map_err(|e| format!("查询响应数据失败：{}", e))?;
+            if available == 0 {
+                break;
             }
             let mut buf = vec![0u8; available as usize];
             let mut read = 0u32;
-            if let Err(e) = WinHttpReadData(
+            WinHttpReadData(
                 request,
                 buf.as_mut_ptr() as *mut c_void,
                 available,
                 &mut read,
-            ) {
-                log(&format!("WARN ReadData {}", e));
-                break;
-            }
+            )
+            .map_err(|e| format!("读取响应数据失败：{}", e))?;
             buf.truncate(read as usize);
             if buf.is_empty() {
                 break;
             }
-            match &mut sink {
-                Some(f) => f(&buf),
-                None => result.extend_from_slice(&buf),
+            total += buf.len() as u64;
+            if success && let Some(f) = sink.as_mut() {
+                if !f(&buf) {
+                    return Err("下载被中止".into());
+                }
+                continue;
+            }
+            // Error bodies are only kept for diagnostics.
+            if !success && bytes.len() >= 4096 {
+                continue;
+            }
+            bytes.extend_from_slice(&buf);
+        }
+        Ok(OneResp {
+            status,
+            location: None,
+            content_length,
+            bytes,
+            total,
+        })
+    }
+}
+
+pub struct HttpResponse {
+    pub bytes: Vec<u8>,
+    pub final_url: String,
+    pub content_length: Option<u64>,
+}
+
+/// Perform a request, following up to six redirects manually.
+fn request(
+    method: &str,
+    url: &str,
+    headers: &[(&str, String)],
+    body: Option<&[u8]>,
+    mut sink: Sink<'_>,
+) -> Result<HttpResponse, String> {
+    let streaming = sink.is_some();
+    let mut current = url.to_string();
+    let mut cur_method = method.to_string();
+    let mut cur_body = body;
+    let empty: [(&str, String); 0] = [];
+
+    for hop in 0..6 {
+        let send_headers: &[(&str, String)] = if hop == 0 { headers } else { &empty };
+        let r = one(&cur_method, &current, send_headers, cur_body, &mut sink)?;
+        log(&format!(
+            "HTTP {} {} hop={} status={} len={}",
+            cur_method,
+            split_url(&current).map(|u| u.host).unwrap_or_default(),
+            hop,
+            r.status,
+            r.total
+        ));
+        if (300..400).contains(&r.status) {
+            let Some(loc) = r.location else {
+                return Err(format!("服务器返回 HTTP {} 但没有重定向地址", r.status));
+            };
+            current = resolve_location(&current, &loc);
+            // 301/302/303 turn POST into GET and drop the request body.
+            if cur_method != "GET" && cur_method != "HEAD" {
+                cur_method = "GET".into();
+                cur_body = None;
+            }
+            continue;
+        }
+        if !(200..300).contains(&r.status) {
+            let preview = String::from_utf8_lossy(&r.bytes);
+            return Err(format!(
+                "服务器返回 HTTP {}{}",
+                r.status,
+                if preview.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "（{}）",
+                        preview.trim().chars().take(80).collect::<String>()
+                    )
+                }
+            ));
+        }
+        if streaming {
+            if let Some(expected) = r.content_length
+                && expected > 0
+                && r.total != expected
+            {
+                return Err(format!(
+                    "下载不完整：应为 {} 字节，实际 {} 字节",
+                    expected, r.total
+                ));
+            }
+            if r.total == 0 {
+                return Err("下载内容为空（服务器未返回安装包）".into());
             }
         }
-        WinHttpCloseHandle(request).ok();
-        WinHttpCloseHandle(connect).ok();
-        WinHttpCloseHandle(session).ok();
-        log(&format!("RESP {} bytes={}", u.path, result.len()));
-        if result.len() < 300 && sink.is_none() {
-            log(&format!("BODY {}", String::from_utf8_lossy(&result)));
-        }
-        Ok(result)
+        return Ok(HttpResponse {
+            bytes: r.bytes,
+            final_url: current,
+            content_length: r.content_length,
+        });
     }
+    Err("重定向次数过多，已放弃下载".into())
+}
+
+/// JSON/API request: body is returned, no streaming sink.
+fn http(
+    method: &str,
+    url: &str,
+    headers: &[(&str, String)],
+    body: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    request(method, url, headers, body, None).map(|r| r.bytes)
 }
 
 fn identity_headers(token: &str) -> Vec<(&'static str, String)> {
@@ -220,38 +458,36 @@ pub fn register() -> Result<String, String> {
         &url,
         &[("Content-Type", "application/json".into())],
         Some(body.as_bytes()),
-        None,
     )?;
-    let p = match model::payload(&resp) {
-        Ok(v) => v,
-        Err(e) => {
-            log(&format!("FAIL register payload {}", e));
-            return Err(e);
-        }
-    };
+    let p = model::payload(&resp).map_err(|e| {
+        log(&format!("FAIL register payload {}", e));
+        e
+    })?;
     let token = p
         .data
         .as_str()
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| format!("register returned status {} with no token", p.status))?;
+        .ok_or_else(|| format!("注册失败：status={} 且未返回令牌", p.status))?;
     log(&format!("TOKEN ok len={} status={}", token.len(), p.status));
     Ok(token)
 }
 
 fn get(token: &str, path: &str) -> Result<serde_json::Value, String> {
     let url = format!("{}{}", BASE, path);
-    let resp = http("GET", &url, &identity_headers(token), None, None)?;
-    let p = match model::payload(&resp) {
-        Ok(v) => v,
-        Err(e) => {
-            log(&format!("FAIL get payload {} head={}", e, String::from_utf8_lossy(&resp[..resp.len().min(120)])));
-            return Err(e);
-        }
-    };
-    log(&format!("GET {} status={} dataLen={}", path, p.status, p.data.to_string().len()));
+    let resp = http("GET", &url, &identity_headers(token), None)?;
+    let p = model::payload(&resp).map_err(|e| {
+        log(&format!("FAIL get payload {} bytes={}", e, resp.len()));
+        e
+    })?;
+    log(&format!(
+        "GET {} status={} dataLen={}",
+        path.split('?').next().unwrap_or(path),
+        p.status,
+        p.data.to_string().len()
+    ));
     if p.status != 0 {
-        return Err(format!("api status {}", p.status));
+        return Err(format!("接口返回 status {}", p.status));
     }
     Ok(p.data)
 }
@@ -270,17 +506,13 @@ pub fn class_apps(token: &str, code: &str, class_id: &str, limit: u32) -> Result
     );
     let v = get(token, &path)?;
     let out = model::parse_apps(&v);
-    log(&format!("APPS class={} id={} count={}", code, class_id, out.len()));
+    log(&format!(
+        "APPS class={} id={} count={}",
+        code,
+        class_id,
+        out.len()
+    ));
     Ok(out)
-}
-
-#[allow(dead_code)]
-pub fn rank_apps(token: &str, limit: u32) -> Result<Vec<App>, String> {
-    let path = format!(
-        "/appstorecontents/rank/rank_apps?code=ranklist%3AweekDownloadRank&skip=0&limit={}",
-        limit
-    );
-    Ok(model::parse_apps(&get(token, &path)?))
 }
 
 pub fn search(token: &str, keyword: &str) -> Result<Vec<App>, String> {
@@ -290,7 +522,7 @@ pub fn search(token: &str, keyword: &str) -> Result<Vec<App>, String> {
     );
     let v = get(token, &path)?;
     let out = model::parse_apps(&v);
-    log(&format!("SEARCH {} count={}", keyword, out.len()));
+    log(&format!("SEARCH count={}", out.len()));
     Ok(out)
 }
 
@@ -303,7 +535,97 @@ pub fn details(token: &str, id: &str) -> Result<Detail, String> {
     serde_json::from_value::<Detail>(data).map_err(|e| e.to_string())
 }
 
-/// Fetch a binary resource (app icon or installer). `sink` receives chunks.
-pub fn fetch_binary(url: &str, sink: Option<&mut dyn FnMut(&[u8])>) -> Result<Vec<u8>, String> {
-    http("GET", url, &[], None, sink)
+/// Fetch a small binary resource (app icon).
+pub fn fetch_binary(url: &str) -> Result<Vec<u8>, String> {
+    http("GET", url, &[], None)
+}
+
+/// Metadata returned after a streamed package download. The final URL lets the
+/// caller pick a truthful file extension instead of blindly writing `.exe`.
+pub struct Fetch {
+    pub final_url: String,
+    pub size: u64,
+}
+
+/// Stream an installer to `sink`. Returns `false` from the sink to abort.
+pub fn fetch_binary_ex(url: &str, sink: &mut dyn FnMut(&[u8]) -> bool) -> Result<Fetch, String> {
+    let r = request("GET", url, &[], None, Some(sink))?;
+    Ok(Fetch {
+        final_url: r.final_url,
+        size: r.content_length.unwrap_or(0),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_redirect_locations() {
+        let base = "https://pc-store.lenovomm.cn/dlservice/download?softid=L1";
+        assert_eq!(
+            resolve_location(base, "http://cdn.example.com/a/b.exe"),
+            "http://cdn.example.com/a/b.exe"
+        );
+        assert_eq!(
+            resolve_location(base, "//cdn.example.com/a.exe"),
+            "https://cdn.example.com/a.exe"
+        );
+        assert_eq!(
+            resolve_location(base, "/pkg/a.exe"),
+            "https://pc-store.lenovomm.cn/pkg/a.exe"
+        );
+        assert_eq!(
+            resolve_location(base, "a.exe"),
+            "https://pc-store.lenovomm.cn/dlservice/a.exe"
+        );
+    }
+
+    #[test]
+    fn splits_urls_with_query_and_ipv6() {
+        let u = split_url("https://host.cn:8443/dlservice/download?softid=L1#frag").unwrap();
+        assert_eq!(u.host, "host.cn");
+        assert_eq!(u.port, 8443);
+        assert_eq!(u.path, "/dlservice/download?softid=L1");
+        assert!(u.secure);
+        let v = split_url("http://[::1]:8080/x y.exe").unwrap();
+        assert_eq!(v.host, "::1");
+        assert_eq!(v.port, 8080);
+        assert_eq!(v.path, "/x%20y.exe");
+        assert!(split_url("ftp://host/x").is_err());
+    }
+
+    /// Live checks against the real store. Run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore = "requires live network"]
+    fn live_download_endpoint_redirects_to_cdn() {
+        let url = format!("{}/dlservice/download?softid=L120416", BASE);
+        let mut sink: Sink<'_> = None;
+        let r = one("GET", &url, &[], None, &mut sink).expect("request failed");
+        assert_eq!(r.status, 302, "expected redirect, got {}", r.status);
+        let loc = r.location.expect("missing Location header");
+        assert!(loc.starts_with("http://"), "unexpected Location: {}", loc);
+        assert!(loc.contains(".exe"), "unexpected Location: {}", loc);
+    }
+
+    #[test]
+    #[ignore = "requires live network"]
+    fn live_download_follows_redirect_and_returns_pe() {
+        let url = format!("{}/dlservice/download?softid=L120416", BASE);
+        let mut head = Vec::new();
+        let result = request(
+            "GET",
+            &url,
+            &[],
+            None,
+            Some(&mut |chunk: &[u8]| -> bool {
+                if head.is_empty() {
+                    head.extend_from_slice(&chunk[..chunk.len().min(2)]);
+                }
+                false // abort after the first chunk; we only need the signature
+            }),
+        );
+        assert!(result.is_err(), "sink abort should surface as an error");
+        assert_eq!(&head, b"MZ", "first bytes are not a PE executable");
+    }
 }

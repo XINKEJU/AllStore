@@ -1,0 +1,5 @@
+# Keep the single-exe build free of the VC++ redistributable: link the CRT
+# statically. Without this, the MSVC target imports VCRUNTIME140.dll and the
+# exe fails to start on a clean Windows install.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

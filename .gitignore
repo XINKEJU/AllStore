@@ -13,3 +13,4 @@
 real-identity.json
 *identity*.json
 node_modules/
+/.workbuddy/

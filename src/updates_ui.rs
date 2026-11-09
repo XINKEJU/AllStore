@@ -1,17 +1,21 @@
 //! The "software updates" page: layout, interaction and a hardened downloader
 //! shared by normal installs and updates.
 
+use std::cell::Cell;
 use std::fs::File;
 use std::io::{Read, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 
 use crate::app::{
     AppState, BTN_H, GAP, HIT_ALL, HIT_CHECK, HIT_ROW, HIT_ROW_IGNORE, HIT_ROW_UPDATE, Mode, NAV_W,
-    PAD, Payload, ROW_H, STATUS_H, TOP_H, WM_APP_DONE, WM_APP_STATUS, WM_APP_UPDATE_DONE,
-    WM_APP_UPDATE_PROGRESS, clip_lines, draw_button, ellipsize, in_rect, post,
+    PAD, Payload, ROW_H, STATUS_H, TOP_H, WM_APP_DL_DONE, WM_APP_DL_PROGRESS, WM_APP_STATUS,
+    WM_APP_UPDATE_DONE, WM_APP_UPDATE_PROGRESS, draw_button, in_rect, post,
 };
+use crate::downloads::Progress;
 use crate::gfx;
 use crate::net;
 use crate::update::{self, UpdateItem};
@@ -81,6 +85,50 @@ fn unique_path(dir: &str, stem: &str, ext: &str) -> String {
     candidate
 }
 
+/// Incomplete downloads live in the app's own temp folder, not in Downloads:
+/// a cancelled or killed transfer used to leave multi-MB `.part` files in the
+/// user's Downloads folder forever.
+fn temp_dir() -> std::path::PathBuf {
+    let p = std::env::temp_dir().join("MindosShop");
+    let _ = std::fs::create_dir_all(&p);
+    p
+}
+
+pub(crate) fn cleanup_temp() {
+    let Ok(entries) = std::fs::read_dir(temp_dir()) else {
+        return;
+    };
+    let cutoff = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .saturating_sub(6 * 3600);
+    for e in entries.flatten() {
+        let Ok(meta) = e.metadata() else { continue };
+        let age = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if age < cutoff {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// rename() fails across volumes; copy is the portable fallback.
+fn persist(tmp: &str, path: &str) -> Result<(), String> {
+    match std::fs::rename(tmp, path) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            std::fs::copy(tmp, path).map_err(|e| format!("无法保存安装包：{}", e))?;
+            let _ = std::fs::remove_file(tmp);
+            Ok(())
+        }
+    }
+}
+
 /// Reject HTML error pages / gateway interstitials that would otherwise be
 /// saved as a plausible-looking `.exe`.
 fn looks_like_package(file: &mut File, ext: &str) -> bool {
@@ -99,7 +147,22 @@ fn looks_like_package(file: &mut File, ext: &str) -> bool {
 
 /// Stream a package to Downloads into a temporary `.part` file, then rename
 /// it only after the size, status code and file signature all check out.
+#[cfg(test)]
 pub(crate) fn download_package(name: &str, url: &str, h: usize) -> Result<String, String> {
+    download_package_ex(name, url, h, None, None)
+}
+
+/// Task-aware variant. `Content-Length` is reported before the first byte and
+/// every chunk feeds a throttled progress emitter, so the UI always has a
+/// meaningful percentage — the previous code only posted once per 8 MB and
+/// therefore showed nothing at all for typical 1-3 MB installers.
+pub(crate) fn download_package_ex(
+    name: &str,
+    url: &str,
+    h: usize,
+    task_id: Option<u64>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<String, String> {
     let safe = sanitize(name);
     let dir = match std::env::var("USERPROFILE") {
         Ok(p) => format!("{}\\Downloads", p),
@@ -110,14 +173,24 @@ pub(crate) fn download_package(name: &str, url: &str, h: usize) -> Result<String
         .duration_since(UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    let tmp = format!("{}\\.{}-{}.part", dir, safe, stamp);
+    let tmp = temp_dir()
+        .join(format!(".{}-{}.part", safe, stamp))
+        .to_string_lossy()
+        .to_string();
     let mut file = File::create(&tmp).map_err(|e| format!("无法创建文件：{}", e))?;
     let mut total = 0usize;
-    let mut next = 8 * 1024 * 1024usize;
     let mut write_error: Option<String> = None;
+    let mut progress = Progress::new(task_id, h, name);
+    // The header callback and the body sink both run on this thread; a Cell
+    // hands Content-Length from one closure to the other without aliasing.
+    let total_hint = Cell::new(0u64);
 
     let fetch = {
+        let mut meta = |size: u64| total_hint.set(size);
         let mut sink = |chunk: &[u8]| -> bool {
+            if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                return false;
+            }
             if write_error.is_some() {
                 return false;
             }
@@ -126,21 +199,13 @@ pub(crate) fn download_package(name: &str, url: &str, h: usize) -> Result<String
                 return false;
             }
             total += chunk.len();
-            if total >= next {
-                next += 8 * 1024 * 1024;
-                post(
-                    h,
-                    WM_APP_STATUS,
-                    Payload::Status(format!(
-                        "正在下载 {} … {:.0} MB",
-                        name,
-                        total as f64 / 1048576.0
-                    )),
-                );
+            if progress.total() == 0 && total_hint.get() > 0 {
+                progress.set_total(total_hint.get());
             }
+            progress.add(chunk.len());
             true
         };
-        net::fetch_binary_ex(url, &mut sink)
+        net::fetch_binary_stream(url, &mut sink, &mut meta)
     };
     let _ = file.flush();
     drop(file);
@@ -181,7 +246,7 @@ fn finalize(
     }
     drop(probe);
     let path = unique_path(dir, safe, &ext);
-    std::fs::rename(tmp, &path).map_err(|e| format!("无法保存安装包：{}", e))?;
+    persist(tmp, &path)?;
     net::log(&format!(
         "DOWNLOAD ok name={} bytes={} ext={} host={}",
         name,
@@ -318,7 +383,7 @@ impl AppState {
         (content - visible).max(0.0) as i32
     }
 
-    pub(crate) fn render_updates(&mut self, w: f32, h: f32) {
+    pub(crate) fn render_updates(&mut self, w: f32, _h: f32) {
         let p = self.gfx.pal;
         self.gfx.text(
             "软件更新",
@@ -381,16 +446,29 @@ impl AppState {
         );
 
         if self.updates.is_empty() && !self.update_checking {
-            self.gfx.center_text(
+            let card = gfx::rect(NAV_W + PAD, TOP_H + 108.0, w - PAD, TOP_H + 224.0);
+            self.gfx.round(card, 16.0, p.accent_soft);
+            self.gfx.outline(card, p.border, 0.8);
+            self.gfx.text(
                 "未发现可更新应用",
-                gfx::rect(NAV_W, TOP_H + 100.0, w, h - STATUS_H - 40.0),
-                16,
-                false,
-                p.sub,
+                gfx::rect(
+                    card.left + 28.0,
+                    card.top + 24.0,
+                    card.right - 28.0,
+                    card.top + 62.0,
+                ),
+                17,
+                true,
+                p.text,
             );
-            self.gfx.center_text(
+            self.gfx.text(
                 "检查更新会比对商店目录与本机已安装软件，全程在本地完成",
-                gfx::rect(NAV_W, TOP_H + 132.0, w, h - STATUS_H - 8.0),
+                gfx::rect(
+                    card.left + 28.0,
+                    card.top + 64.0,
+                    card.right - 28.0,
+                    card.top + 96.0,
+                ),
                 12,
                 false,
                 p.sub,
@@ -419,18 +497,14 @@ impl AppState {
             let (upd, ign) = Self::row_buttons(r);
             let text_right = ign.left - 12.0;
             self.gfx.text(
-                &ellipsize(&u.name, text_right - (r.left + 84.0), 14),
+                &u.name,
                 gfx::rect(r.left + 84.0, r.top + 12.0, text_right, r.top + 40.0),
                 14,
                 true,
                 p.text,
             );
             self.gfx.text(
-                &ellipsize(
-                    &format!("当前 {}   →   新版 {}", u.current, u.latest),
-                    text_right - (r.left + 84.0),
-                    12,
-                ),
+                &format!("当前 {}   →   新版 {}", u.current, u.latest),
                 gfx::rect(r.left + 84.0, r.top + 42.0, text_right, r.top + 68.0),
                 12,
                 false,
@@ -461,62 +535,82 @@ impl AppState {
         let Some(u) = self.updates.get(i).cloned() else {
             return;
         };
-        let h = self.hwnd_usize();
-        self.status = format!("正在下载更新：{}", u.name);
-        self.invalidate();
-        std::thread::spawn(move || {
-            post(
-                h,
-                WM_APP_STATUS,
-                Payload::Status(format!("正在下载 {} 更新包 …", u.name)),
-            );
-            let result = download_package(&u.name, &u.url, h);
-            post(h, WM_APP_DONE, Payload::Done(result, true));
-        });
+        let id = self.new_download(&u.name, &u.url, u.logo.clone());
+        self.start_task(id);
     }
 
     fn update_all(&mut self) {
-        let items: Vec<(String, String)> = self
+        let items: Vec<(String, String, Option<String>)> = self
             .updates
             .iter()
-            .map(|u| (u.name.clone(), u.url.clone()))
+            .map(|u| (u.name.clone(), u.url.clone(), u.logo.clone()))
             .collect();
         if items.is_empty() {
             return;
         }
         let h = self.hwnd_usize();
-        self.status = format!("正在下载 {} 个更新包…", items.len());
+        let mut jobs: Vec<(u64, String, String, Arc<AtomicBool>)> = Vec::new();
+        for (name, url, logo) in items {
+            let id = self.new_download(&name, &url, logo);
+            if jobs.iter().any(|j| j.0 == id) {
+                continue;
+            }
+            let cancel = self
+                .downloads
+                .iter()
+                .find(|t| t.id == id)
+                .map(|t| t.cancel.clone())
+                .unwrap_or_default();
+            jobs.push((id, name, url, cancel));
+        }
+        let ids: Vec<u64> = jobs.iter().map(|j| j.0).collect();
+        self.mark_running(&ids);
+        let n = jobs.len();
+        self.status = format!("已加入下载队列：{} 个更新包（可在下载管理查看进度）", n);
         self.invalidate();
+        // Still serial: one connection at a time, but each package now has a
+        // full task entry with its own live progress in the download centre.
         std::thread::spawn(move || {
-            let n = items.len();
             let mut ok = 0usize;
             let mut failures: Vec<String> = Vec::new();
-            for (i, (name, url)) in items.into_iter().enumerate() {
+            for (i, (id, name, url, cancel)) in jobs.into_iter().enumerate() {
                 post(
                     h,
                     WM_APP_STATUS,
                     Payload::Status(format!("({}/{}) 正在下载 {} …", i + 1, n, name)),
                 );
-                match download_package(&name, &url, h) {
+                post(
+                    h,
+                    WM_APP_DL_PROGRESS,
+                    Payload::DlProgress {
+                        id,
+                        done: 0,
+                        total: 0,
+                        speed: 0.0,
+                    },
+                );
+                let result = download_package_ex(&name, &url, h, Some(id), Some(cancel));
+                match &result {
                     Ok(_) => ok += 1,
                     Err(e) => {
                         net::log(&format!("UPDATE FAIL {} {}", name, e));
                         failures.push(format!("{}：{}", name, e));
                     }
                 }
+                post(h, WM_APP_DL_DONE, Payload::DlDone { id, result });
             }
             let msg = if failures.is_empty() {
                 format!(
-                    "已下载 {}/{} 个更新包到 Downloads，请依次运行安装程序完成更新",
+                    "已完成 {}/{} 个更新包，请在下载管理或 Downloads 中运行安装程序",
                     ok, n
                 )
             } else {
                 format!(
-                    "已下载 {}/{}，失败 {} 个 — {}",
+                    "已完成 {}/{}，失败 {} 个 — {}",
                     ok,
                     n,
                     failures.len(),
-                    clip_lines(&failures.join("；"), 2400.0, 11, 1)
+                    failures.join("；").chars().take(160).collect::<String>()
                 )
             };
             post(h, WM_APP_STATUS, Payload::Status(msg));
@@ -592,6 +686,43 @@ mod tests {
         assert_eq!(extension_of("http://cdn/x/app.msi?token=abc"), ".msi");
         assert_eq!(extension_of("http://cdn/x/a.zip"), ".zip");
         assert_eq!(extension_of("http://cdn/x/download?softid=1"), ".exe");
+    }
+
+    /// Regression for "the progress bar has no denominator": Content-Length
+    /// must be known before the first body chunk, even across the 302 hop.
+    #[test]
+    #[ignore = "requires live network"]
+    fn live_headers_report_size_before_the_body() {
+        use std::cell::Cell;
+        let url = format!("{}/dlservice/download?softid=L118939", crate::model::BASE);
+        let hint = Cell::new(0u64);
+        let mut chunks = 0usize;
+        let mut size_at_first_chunk = 0u64;
+        let mut meta = |n: u64| hint.set(n);
+        let mut sink = |buf: &[u8]| -> bool {
+            if chunks == 0 {
+                size_at_first_chunk = hint.get();
+            }
+            chunks += 1;
+            !buf.is_empty()
+        };
+        let r = net::fetch_binary_stream(&url, &mut sink, &mut meta)
+            .expect("streaming download must succeed");
+        println!(
+            "content-length={} at_first_chunk={} chunks={} final={}",
+            hint.get(),
+            size_at_first_chunk,
+            chunks,
+            r.final_url
+        );
+        assert!(hint.get() > 0, "server must report Content-Length");
+        assert_eq!(
+            size_at_first_chunk,
+            hint.get(),
+            "size must arrive before the first byte"
+        );
+        assert!(chunks > 1, "body must stream in multiple chunks");
+        assert_eq!(r.size, hint.get());
     }
 
     /// Full round trip: 302 -> plain-HTTP CDN -> temp file -> signature check

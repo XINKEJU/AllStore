@@ -54,11 +54,7 @@ impl App {
         }
     }
     pub fn subtitle(&self) -> String {
-        self.introduction
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .to_string()
+        html_to_text(self.introduction.as_deref().unwrap_or(""))
     }
     pub fn meta(&self) -> String {
         let mut v = Vec::new();
@@ -239,6 +235,57 @@ pub fn urlencode(s: &str) -> String {
     out
 }
 
+/// Store descriptions are HTML fragments (`<p><b><font color=...>`). Drawing
+/// them verbatim shows raw markup, so strip tags, turn block tags into line
+/// breaks and decode the handful of entities the feed actually uses.
+pub fn html_to_text(s: &str) -> String {
+    const BREAKS: [&str; 8] = ["br", "p", "div", "li", "tr", "h1", "h2", "h3"];
+    let mut out = String::new();
+    let mut tag = String::new();
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => {
+                in_tag = true;
+                tag.clear();
+            }
+            '>' => {
+                in_tag = false;
+                let name = tag
+                    .trim()
+                    .trim_start_matches('/')
+                    .split(|c: char| c.is_whitespace() || c == '/')
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if BREAKS.contains(&name.as_str()) {
+                    out.push('\n');
+                }
+            }
+            _ if in_tag => tag.push(c),
+            _ => out.push(c),
+        }
+    }
+    let decoded = out
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace('\r', "\n");
+    let mut lines: Vec<&str> = Vec::new();
+    for line in decoded.lines() {
+        let t = line.trim();
+        if t.is_empty() && lines.last().is_some_and(|l| l.is_empty()) {
+            continue;
+        }
+        lines.push(t);
+    }
+    let text = lines.join("\n").trim().to_string();
+    if text.is_empty() { String::new() } else { text }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +314,22 @@ mod tests {
         assert_eq!(d.score_text(), "64");
         assert!(d.developer_name().is_empty());
         assert_eq!(d.what_new.as_deref(), Some("优化体验"));
+    }
+
+    #[test]
+    fn html_markup_is_stripped_from_descriptions() {
+        let raw = "<p><b><font color=\"#c24f4a\">不能卸载</font></b></p><p>第二行<br/>换行&nbsp;A &amp; B</p>";
+        let text = html_to_text(raw);
+        assert!(
+            !text.contains('<') && !text.contains('>'),
+            "tags leaked: {text}"
+        );
+        assert!(!text.contains("font"), "attribute text leaked: {text}");
+        assert!(text.contains("不能卸载"));
+        assert!(text.contains("第二行"));
+        assert!(text.contains("换行 A & B"), "entities not decoded: {text}");
+        assert_eq!(html_to_text("  "), "");
+        assert_eq!(html_to_text("纯文本"), "纯文本");
     }
 
     #[test]

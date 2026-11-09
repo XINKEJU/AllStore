@@ -2,16 +2,18 @@
 //!
 //! Layout uses a single set of spacing tokens and one shared hit-test so the
 //! rendering and the click targets can never drift apart.
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::c_void;
+use std::sync::{Arc, Mutex};
 
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Gdi::{InvalidateRect, ValidateRect};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::downloads::{self, DlState, DlTask};
 use crate::gfx::{self, Gfx, Palette};
-use crate::model::{App, ClassGroup, Detail};
+use crate::model::{App, ClassGroup, Detail, html_to_text};
 use crate::net;
 use crate::update::{self, UpdateItem};
 use crate::updates_ui;
@@ -21,23 +23,36 @@ pub const WM_APP_LIST: u32 = 0x8000 + 2;
 pub const WM_APP_ICON: u32 = 0x8000 + 3;
 pub const WM_APP_DETAIL: u32 = 0x8000 + 4;
 pub const WM_APP_STATUS: u32 = 0x8000 + 5;
-pub const WM_APP_DONE: u32 = 0x8000 + 6;
 pub const WM_APP_UPDATE_PROGRESS: u32 = 0x8000 + 7;
 pub const WM_APP_UPDATE_DONE: u32 = 0x8000 + 8;
+pub const WM_APP_DL_PROGRESS: u32 = 0x8000 + 9;
+pub const WM_APP_DL_DONE: u32 = 0x8000 + 10;
 
 // Design tokens: one grid for every screen.
 pub(crate) const NAV_W: f32 = 200.0;
-pub(crate) const TOP_H: f32 = 68.0;
-pub(crate) const STATUS_H: f32 = 32.0;
+pub(crate) const TOP_H: f32 = 72.0;
+pub(crate) const STATUS_H: f32 = 40.0;
 pub(crate) const PAD: f32 = 24.0;
 pub(crate) const GAP: f32 = 14.0;
-pub(crate) const CARD_W: f32 = 272.0;
-pub(crate) const CARD_H: f32 = 128.0;
+pub(crate) const CARD_W: f32 = 292.0;
+pub(crate) const CARD_H: f32 = 176.0;
 pub(crate) const BTN_H: f32 = 32.0;
 pub(crate) const NAV_ROW_H: f32 = 40.0;
 pub(crate) const ROW_H: f32 = 84.0;
-pub(crate) const MIN_W: i32 = 940;
-pub(crate) const MIN_H: i32 = 580;
+pub(crate) const HERO_H: f32 = 88.0;
+pub(crate) const MIN_W: i32 = 1000;
+pub(crate) const MIN_H: i32 = 620;
+
+// Detail page: the hero band and the scrolling body are separate regions.
+// Keeping these as tokens makes it impossible for a progress bar to be drawn
+// on top of a line of text (the 0.4.0 bug).
+pub(crate) const DETAIL_HERO_TOP: f32 = TOP_H + 14.0;
+pub(crate) const DETAIL_HERO_BOTTOM: f32 = TOP_H + 214.0;
+pub(crate) const DETAIL_DIVIDER_Y: f32 = TOP_H + 230.0;
+pub(crate) const DETAIL_BODY_TOP: f32 = TOP_H + 246.0;
+// Compile-time guard: the hero card, its divider and the scrolling body must
+// stay in strictly separate vertical bands.
+const _: () = assert!(DETAIL_HERO_BOTTOM < DETAIL_DIVIDER_Y && DETAIL_DIVIDER_Y < DETAIL_BODY_TOP);
 
 pub const HIT_SEARCH_BOX: u8 = 0;
 pub const HIT_SEARCH_BTN: u8 = 1;
@@ -51,6 +66,12 @@ pub const HIT_ROW_IGNORE: u8 = 8;
 pub const HIT_ROW: u8 = 9;
 pub const HIT_INSTALL: u8 = 10;
 pub const HIT_CARD: u8 = 11;
+pub const HIT_DL_CANCEL: u8 = 12;
+pub const HIT_DL_RETRY: u8 = 13;
+pub const HIT_DL_OPEN: u8 = 14;
+pub const HIT_DL_REMOVE: u8 = 15;
+pub const HIT_DL_CLEAR: u8 = 16;
+pub const HIT_DL_NAV: u8 = 17;
 
 pub enum Payload {
     Data(Result<(String, Vec<ClassGroup>, Vec<App>), String>),
@@ -62,8 +83,16 @@ pub enum Payload {
     },
     Detail(Result<Detail, String>, u64),
     Status(String),
-    /// (download result, is_update)
-    Done(Result<String, String>, bool),
+    DlProgress {
+        id: u64,
+        done: u64,
+        total: u64,
+        speed: f64,
+    },
+    DlDone {
+        id: u64,
+        result: Result<String, String>,
+    },
     UpdateProgress(usize, usize),
     UpdateDone(Result<Vec<UpdateItem>, String>),
 }
@@ -82,6 +111,7 @@ pub(crate) fn post(hwnd_usize: usize, msg: u32, p: Payload) {
 pub enum NavKind {
     Browse,
     Updates,
+    Downloads,
 }
 
 #[derive(Clone)]
@@ -90,6 +120,8 @@ pub struct NavItem {
     pub code: String,
     pub id: String,
     pub kind: NavKind,
+    /// 0 = 发现, 1 = 管理, 2 = 分类. Group headers are derived from this.
+    pub group: u8,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,6 +129,7 @@ pub enum Mode {
     Browse,
     Detail,
     Updates,
+    Downloads,
 }
 
 pub struct AppState {
@@ -124,109 +157,26 @@ pub struct AppState {
     pub update_progress: (usize, usize),
     pub update_checked_at: u64,
     pub ignored: Vec<String>,
+    /// Download centre tasks; the single source of truth for every progress UI.
+    pub downloads: Vec<DlTask>,
+    pub next_dl_id: u64,
     list_epoch: u64,
     detail_epoch: u64,
     pending_icons: HashSet<String>,
 }
 
 // ---------------------------------------------------------------------------
-// Text helpers. Direct2D's DrawText wraps on its own; pre-wrapping with a
-// slightly narrower width keeps line breaks predictable and lets us add a
-// proper ellipsis instead of clipping a word in half.
+// Layout helpers. Every rectangle used for drawing is produced here so the
+// hit-test, the renderer and the regression tests all agree on one geometry.
 // ---------------------------------------------------------------------------
 
-fn char_width(c: char, size: u32) -> f32 {
-    let s = size as f32;
-    if (c as u32) < 0x2E80 {
-        s * 0.56
-    } else {
-        s * 1.02
-    }
-}
-
-pub(crate) fn wrap_text(s: &str, width: f32, size: u32) -> String {
-    let clean = s.replace("\r\n", "\n").replace('\r', "\n");
-    let mut out: Vec<String> = Vec::new();
-    for para in clean.split('\n') {
-        let chars: Vec<char> = para.chars().filter(|c| !c.is_control()).collect();
-        if chars.is_empty() {
-            if !out.is_empty() && !out.last().is_some_and(|l| l.is_empty()) {
-                out.push(String::new());
-            }
-            continue;
-        }
-        let mut start = 0usize;
-        while start < chars.len() {
-            let mut used = 0.0f32;
-            let mut end = start;
-            while end < chars.len() {
-                let cw = char_width(chars[end], size);
-                if used + cw > width && end > start {
-                    break;
-                }
-                used += cw;
-                end += 1;
-            }
-            if end == start {
-                end = start + 1;
-            }
-            out.push(
-                chars[start..end]
-                    .iter()
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string(),
-            );
-            start = end;
-        }
-    }
-    out.join("\n")
-}
-
-pub(crate) fn clip_lines(s: &str, width: f32, size: u32, max_lines: usize) -> String {
-    let wrapped = wrap_text(s, width, size);
-    let lines: Vec<&str> = wrapped.lines().collect();
-    if lines.len() <= max_lines {
-        return wrapped;
-    }
-    let mut out: Vec<String> = lines[..max_lines.saturating_sub(1)]
-        .iter()
-        .map(|l| l.to_string())
-        .collect();
-    let mut last: String = lines[max_lines - 1].chars().take(64).collect();
-    last.pop(); // leave room for the ellipsis
-    last.push('…');
-    out.push(last);
-    out.join("\n")
-}
-
-pub(crate) fn ellipsize(s: &str, width: f32, size: u32) -> String {
-    let chars: Vec<char> = s.chars().filter(|c| !c.is_control()).collect();
-    let mut used = 0.0f32;
-    let mut n = 0usize;
-    for c in &chars {
-        let cw = char_width(*c, size);
-        if used + cw > width {
-            break;
-        }
-        used += cw;
-        n += 1;
-    }
-    if n >= chars.len() {
-        return chars.iter().collect();
-    }
-    let mut out: String = chars[..n.max(1)].iter().collect();
-    out.pop();
-    out.push('…');
-    out
-}
-
-fn estimate_width(s: &str, size: u32) -> f32 {
-    s.chars().map(|c| char_width(c, size)).sum()
-}
-
-fn short_path(s: &str) -> String {
-    s.rsplit(['\\', '/']).next().unwrap_or(s).to_string()
+/// A lone card with a huge empty gutter looks nothing like a store: keep at
+/// least two columns and stretch every card to exactly fill the content pane.
+fn layout_columns(width_dip: f32) -> (usize, f32) {
+    let content_w = (width_dip - NAV_W - 2.0 * PAD).max(240.0);
+    let cols = (((content_w + GAP) / (CARD_W + GAP)) as usize).clamp(2, 5);
+    let cw = (content_w - (cols - 1) as f32 * GAP) / cols as f32;
+    (cols, cw)
 }
 
 pub(crate) fn draw_button(
@@ -281,12 +231,21 @@ impl AppState {
                     code: "soft".into(),
                     id: "-1".into(),
                     kind: NavKind::Browse,
+                    group: 0,
                 },
                 NavItem {
                     label: "软件更新".into(),
                     code: String::new(),
                     id: String::new(),
                     kind: NavKind::Updates,
+                    group: 1,
+                },
+                NavItem {
+                    label: "下载管理".into(),
+                    code: String::new(),
+                    id: String::new(),
+                    kind: NavKind::Downloads,
+                    group: 1,
                 },
             ],
             active_nav: 0,
@@ -306,6 +265,8 @@ impl AppState {
             update_progress: (0, 0),
             update_checked_at: cache.checked_at,
             ignored: cache.ignored,
+            downloads: Vec::new(),
+            next_dl_id: 0,
             list_epoch: 0,
             detail_epoch: 0,
             pending_icons: HashSet::new(),
@@ -320,6 +281,8 @@ impl AppState {
         String::from_utf16_lossy(&self.search)
     }
 
+    /// Fetch logos through a small fixed worker pool. Spawning one thread per
+    /// URL (28 at a time) saturated WinHTTP and made the first paint sluggish.
     pub fn queue_icons(&mut self) {
         let mut urls: Vec<String> = self
             .apps
@@ -327,21 +290,33 @@ impl AppState {
             .filter_map(|a| a.logo_url().map(str::to_string))
             .collect();
         urls.extend(self.updates.iter().filter_map(|u| u.logo.clone()));
-        let mut queued = 0;
+        let mut pending: Vec<String> = Vec::new();
         for url in urls {
             if self.gfx.icons.contains_key(&url) || !self.pending_icons.insert(url.clone()) {
                 continue;
             }
-            let h = self.hwnd_usize();
-            std::thread::spawn(move || {
-                // An empty result still posts, so a failed icon can be retried.
-                let bytes = net::fetch_binary(&url).unwrap_or_default();
-                post(h, WM_APP_ICON, Payload::Icon { key: url, bytes });
-            });
-            queued += 1;
-            if queued >= 28 {
+            pending.push(url);
+            if pending.len() >= 60 {
                 break;
             }
+        }
+        if pending.is_empty() {
+            return;
+        }
+        let workers = pending.len().min(6);
+        let queue = Arc::new(Mutex::new(VecDeque::from(pending)));
+        let h = self.hwnd_usize();
+        for _ in 0..workers {
+            let q = Arc::clone(&queue);
+            std::thread::spawn(move || {
+                loop {
+                    let next = q.lock().ok().and_then(|mut g| g.pop_front());
+                    let Some(url) = next else { break };
+                    // An empty result still posts, so a failed icon can be retried.
+                    let bytes = net::fetch_binary(&url).unwrap_or_default();
+                    post(h, WM_APP_ICON, Payload::Icon { key: url, bytes });
+                }
+            });
         }
     }
 
@@ -367,23 +342,24 @@ impl AppState {
     }
 
     fn load_nav(&mut self, classes: &[ClassGroup]) {
-        let was_updates = self
+        let previous = self
             .nav
             .get(self.active_nav)
-            .is_some_and(|n| n.kind == NavKind::Updates);
+            .map(|n| (n.kind.clone(), n.id.clone()));
         self.nav.clear();
-        self.nav.push(NavItem {
-            label: "推荐".into(),
-            code: "soft".into(),
-            id: "-1".into(),
-            kind: NavKind::Browse,
-        });
-        self.nav.push(NavItem {
-            label: "软件更新".into(),
-            code: String::new(),
-            id: String::new(),
-            kind: NavKind::Updates,
-        });
+        for (label, code, id, kind, group) in [
+            ("推荐", "soft", "-1", NavKind::Browse, 0u8),
+            ("软件更新", "", "", NavKind::Updates, 1u8),
+            ("下载管理", "", "", NavKind::Downloads, 1u8),
+        ] {
+            self.nav.push(NavItem {
+                label: label.into(),
+                code: code.into(),
+                id: id.into(),
+                kind,
+                group,
+            });
+        }
         for g in classes {
             if g.code != "soft" {
                 continue;
@@ -397,10 +373,13 @@ impl AppState {
                     code: g.code.clone(),
                     id: c.id.clone(),
                     kind: NavKind::Browse,
+                    group: 2,
                 });
             }
         }
-        self.active_nav = if was_updates { 1 } else { 0 };
+        self.active_nav = previous
+            .and_then(|(kind, id)| self.nav.iter().position(|n| n.kind == kind && n.id == id))
+            .unwrap_or(0);
     }
 
     fn next_epoch(&mut self) -> u64 {
@@ -417,10 +396,23 @@ impl AppState {
         self.focus_search = false;
         self.mode = Mode::Browse;
         self.scroll = 0;
-        if item.kind == NavKind::Updates {
-            self.mode = Mode::Updates;
-            self.show_updates();
-            return;
+        match item.kind {
+            NavKind::Updates => {
+                self.mode = Mode::Updates;
+                self.show_updates();
+                return;
+            }
+            NavKind::Downloads => {
+                self.mode = Mode::Downloads;
+                self.status = format!(
+                    "下载管理  ·  {} 个任务  ·  {} 个进行中",
+                    self.downloads.len(),
+                    self.active_count()
+                );
+                self.invalidate();
+                return;
+            }
+            NavKind::Browse => {}
         }
         let epoch = self.next_epoch();
         self.status = format!("正在加载「{}」…", item.label);
@@ -465,7 +457,7 @@ impl AppState {
         self.detail_index = idx;
         self.detail_extra = None;
         self.scroll = 0;
-        self.status = "应用详情  ·  点击「下载安装」保存到 Downloads".into();
+        self.status = "应用详情  ·  点击「获取」下载安装包到 Downloads".into();
         self.invalidate();
         let h = self.hwnd_usize();
         let token = self.token.clone();
@@ -479,181 +471,289 @@ impl AppState {
         });
     }
 
+    /// Install button = download task control. One click starts, a second
+    /// cancels, a finished task opens the folder and a failed one retries.
     fn start_download(&mut self, idx: usize) {
         let Some(app) = self.apps.get(idx).cloned() else {
             return;
         };
+        let existing = self
+            .task_for(&app.name)
+            .map(|t| (t.id, t.state, t.path.clone()));
+        if let Some((id, state, path)) = existing {
+            match state {
+                DlState::Downloading | DlState::Queued => self.cancel_task(id),
+                DlState::Failed | DlState::Canceled => self.retry_task(id),
+                DlState::Done => {
+                    if let Some(p) = path {
+                        downloads::open_folder(&p);
+                        self.status = "已在资源管理器中选中安装包".into();
+                        self.invalidate();
+                    }
+                }
+            }
+            return;
+        }
         let url = self
             .detail_extra
             .as_ref()
             .and_then(|d| d.download_url.clone())
             .filter(|u| u.starts_with("http"))
             .unwrap_or_else(|| app.download_url());
-        let h = self.hwnd_usize();
-        self.status = format!("正在下载 {} …", app.name);
-        self.invalidate();
-        std::thread::spawn(move || {
-            post(
-                h,
-                WM_APP_STATUS,
-                Payload::Status(format!("正在下载 {} …", app.name)),
-            );
-            let result = updates_ui::download_package(&app.name, &url, h);
-            post(h, WM_APP_DONE, Payload::Done(result, false));
-        });
+        let id = self.new_download(&app.name, &url, app.logo_url().map(str::to_string));
+        self.start_task(id);
     }
 
     fn cols(&self) -> usize {
-        let content_w = self.width as f32 - NAV_W - 2.0 * PAD;
-        (((content_w + GAP) / (CARD_W + GAP)) as usize).max(1)
+        layout_columns(self.width as f32).0
+    }
+
+    fn card_w(&self) -> f32 {
+        layout_columns(self.width as f32).1
     }
 
     fn card_rect(&self, i: usize) -> Option<(f32, f32, f32, f32)> {
         let cols = self.cols();
+        let cw = self.card_w();
         let row = i / cols;
         let col = i % cols;
-        let x = NAV_W + PAD + col as f32 * (CARD_W + GAP);
-        let y = TOP_H + 76.0 + row as f32 * (CARD_H + GAP) - self.scroll as f32;
+        let x = NAV_W + PAD + col as f32 * (cw + GAP);
+        let y = TOP_H + HERO_H + 28.0 + row as f32 * (CARD_H + GAP) - self.scroll as f32;
         let h = self.height as f32;
-        if y + CARD_H < TOP_H + 70.0 || y > h - STATUS_H {
+        if y + CARD_H < TOP_H + HERO_H + 16.0 || y > h - STATUS_H {
             return None;
         }
-        Some((x, y, x + CARD_W, y + CARD_H))
+        Some((x, y, x + cw, y + CARD_H))
     }
 
     fn install_rect(card: (f32, f32, f32, f32)) -> D2D_RECT_F {
+        gfx::rect(card.2 - 100.0, card.3 - 46.0, card.2 - 14.0, card.3 - 14.0)
+    }
+
+    fn card_name_rect(card: (f32, f32, f32, f32)) -> D2D_RECT_F {
+        gfx::rect(card.0 + 92.0, card.1 + 12.0, card.2 - 16.0, card.1 + 38.0)
+    }
+
+    fn card_desc_rect(card: (f32, f32, f32, f32)) -> D2D_RECT_F {
+        gfx::rect(card.0 + 92.0, card.1 + 40.0, card.2 - 16.0, card.1 + 80.0)
+    }
+
+    fn card_meta_rect(card: (f32, f32, f32, f32)) -> D2D_RECT_F {
+        let ir = Self::install_rect(card);
+        gfx::rect(card.0 + 16.0, card.1 + 98.0, ir.left - 14.0, card.1 + 120.0)
+    }
+
+    fn card_bar_rect(card: (f32, f32, f32, f32)) -> D2D_RECT_F {
+        let ir = Self::install_rect(card);
         gfx::rect(
-            card.2 - 94.0,
-            card.3 - 16.0 - BTN_H,
-            card.2 - 16.0,
-            card.3 - 16.0,
+            card.0 + 16.0,
+            card.1 + 132.0,
+            ir.left - 14.0,
+            card.1 + 138.0,
+        )
+    }
+
+    fn card_status_rect(card: (f32, f32, f32, f32)) -> D2D_RECT_F {
+        let ir = Self::install_rect(card);
+        gfx::rect(
+            card.0 + 16.0,
+            card.1 + 142.0,
+            ir.left - 14.0,
+            card.1 + 162.0,
         )
     }
 
     fn back_rect() -> D2D_RECT_F {
-        gfx::rect(NAV_W + PAD, TOP_H + 14.0, NAV_W + PAD + 84.0, TOP_H + 48.0)
+        gfx::rect(
+            NAV_W + PAD + 16.0,
+            TOP_H + 26.0,
+            NAV_W + PAD + 92.0,
+            TOP_H + 58.0,
+        )
     }
 
-    fn download_rect() -> D2D_RECT_F {
-        let tx = NAV_W + PAD + 128.0;
-        gfx::rect(tx, TOP_H + 172.0, tx + 144.0, TOP_H + 208.0)
+    fn download_rect(w: f32) -> D2D_RECT_F {
+        gfx::rect(
+            w - PAD - 190.0,
+            TOP_H + 126.0,
+            w - PAD - 24.0,
+            TOP_H + 170.0,
+        )
+    }
+
+    /// Own band below the progress caption — never crosses a line of text.
+    fn download_progress_rect(w: f32) -> D2D_RECT_F {
+        gfx::rect(
+            NAV_W + PAD + 24.0,
+            TOP_H + 194.0,
+            w - PAD - 24.0,
+            TOP_H + 200.0,
+        )
+    }
+
+    fn detail_progress_text_rect(w: f32) -> D2D_RECT_F {
+        gfx::rect(
+            NAV_W + PAD + 24.0,
+            TOP_H + 160.0,
+            w - PAD - 214.0,
+            TOP_H + 186.0,
+        )
+    }
+
+    /// Shortcut in the featured banner.
+    fn hero_dl_rect(w: f32) -> D2D_RECT_F {
+        gfx::rect(w - PAD - 132.0, TOP_H + 42.0, w - PAD - 20.0, TOP_H + 76.0)
     }
 
     fn search_button_rect(w: f32) -> D2D_RECT_F {
-        gfx::rect(w - 104.0, 16.0, w - PAD, 52.0)
+        gfx::rect(w - 104.0, 18.0, w - PAD, 54.0)
     }
 
-    fn nav_y(i: usize) -> f32 {
-        match i {
-            0 => TOP_H + 32.0,
-            1 => TOP_H + 98.0,
-            n => TOP_H + 164.0 + (n - 2) as f32 * NAV_ROW_H,
+    fn detail_text_width(w: f32) -> f32 {
+        (w - NAV_W - 2.0 * PAD - 10.0).max(180.0)
+    }
+
+    fn nav_y(&self, i: usize) -> f32 {
+        let mut y = TOP_H + 8.0;
+        let mut prev = u8::MAX;
+        for (j, n) in self.nav.iter().enumerate() {
+            if n.group != prev {
+                y += 24.0;
+                prev = n.group;
+            }
+            if j == i {
+                break;
+            }
+            y += NAV_ROW_H;
         }
+        y
     }
 
-    fn nav_rect(i: usize) -> D2D_RECT_F {
-        let y = Self::nav_y(i);
+    fn nav_rect(&self, i: usize) -> D2D_RECT_F {
+        let y = self.nav_y(i);
         gfx::rect(12.0, y, NAV_W - 12.0, y + 34.0)
     }
 
-    fn detail_layout(&self, w: f32) -> DetailLayout {
-        let a = self.apps.get(self.detail_index);
-        let d = self.detail_extra.as_ref();
-        let body = d
-            .and_then(|x| x.detail_info.clone())
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| a.map(|x| x.subtitle()))
-            .unwrap_or_else(|| "暂无应用简介。".into());
-        let body = body
-            .replace("<br />", "\n")
-            .replace("<br/>", "\n")
-            .replace("<br>", "\n")
-            .replace("&nbsp;", " ");
-        let cw = (w - NAV_W - 2.0 * PAD - 14.0).max(180.0);
-        let intro = wrap_text(&body, cw, 13);
-        let intro_h = intro.lines().count().max(1) as f32 * 21.0 + 8.0;
+    fn group_title(group: u8) -> &'static str {
+        match group {
+            0 => "发现",
+            1 => "管理",
+            _ => "分类",
+        }
+    }
 
-        let wn = d
-            .and_then(|x| x.what_new.clone())
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let whats_new = if wn.is_empty() {
-            String::new()
-        } else {
-            wrap_text(&wn, cw, 13)
+    /// Build the detail body using **measured** DirectWrite heights. The old
+    /// code pre-wrapped with estimated character widths and reserved 21 px per
+    /// line; when the real font wrapped differently, the extra lines painted
+    /// straight over the next section heading.
+    fn detail_layout(&mut self, w: f32) -> DetailLayout {
+        let (body, wn, info) = {
+            let a = self.apps.get(self.detail_index);
+            let d = self.detail_extra.as_ref();
+            let body = d
+                .and_then(|x| x.detail_info.as_deref())
+                .map(html_to_text)
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| a.map(|x| x.subtitle()))
+                .unwrap_or_else(|| "暂无应用简介。".into());
+            let wn = d
+                .and_then(|x| x.what_new.as_deref())
+                .map(html_to_text)
+                .unwrap_or_default();
+            let mut info: Vec<(String, String)> = Vec::new();
+            let version = d
+                .and_then(|x| x.version.clone())
+                .or_else(|| a.and_then(|x| x.version.clone()))
+                .filter(|s| !s.trim().is_empty());
+            if let Some(v) = version {
+                info.push(("版本".into(), v));
+            }
+            let size = d
+                .and_then(|x| x.size.clone())
+                .or_else(|| a.and_then(|x| x.size.clone()))
+                .filter(|s| !s.trim().is_empty());
+            if let Some(v) = size {
+                info.push(("安装包大小".into(), v));
+            }
+            let downloads = d
+                .and_then(|x| x.downloads.clone())
+                .or_else(|| a.and_then(|x| x.downloads.clone()))
+                .filter(|s| !s.trim().is_empty());
+            if let Some(v) = downloads {
+                info.push(("安装量".into(), v));
+            }
+            let dev = d.map(|x| x.developer_name()).unwrap_or_default();
+            if !dev.is_empty() {
+                info.push(("开发者".into(), dev));
+            }
+            (body, wn, info)
         };
-        let whats_new_h = if whats_new.is_empty() {
+
+        let cw = Self::detail_text_width(w);
+        let intro_h = self.gfx.measure_height(&body, cw, 13, false, 0);
+        let whats_new_h = if wn.trim().is_empty() {
             0.0
         } else {
-            whats_new.lines().count().max(1) as f32 * 21.0 + 8.0
+            self.gfx.measure_height(&wn, cw, 13, false, 0)
         };
-
-        let mut info = Vec::new();
-        let version = d
-            .and_then(|x| x.version.clone())
-            .or_else(|| a.and_then(|x| x.version.clone()))
-            .filter(|s| !s.trim().is_empty());
-        if let Some(v) = version {
-            info.push(("版本".into(), v));
-        }
-        let size = d
-            .and_then(|x| x.size.clone())
-            .or_else(|| a.and_then(|x| x.size.clone()))
-            .filter(|s| !s.trim().is_empty());
-        if let Some(v) = size {
-            info.push(("安装包大小".into(), v));
-        }
-        let downloads = d
-            .and_then(|x| x.downloads.clone())
-            .or_else(|| a.and_then(|x| x.downloads.clone()))
-            .filter(|s| !s.trim().is_empty());
-        if let Some(v) = downloads {
-            info.push(("安装量".into(), v));
-        }
-        let dev = d.map(|x| x.developer_name()).unwrap_or_default();
-        if !dev.is_empty() {
-            info.push(("开发者".into(), dev));
-        }
-
-        let total_h = 32.0
+        let total_h = 34.0
             + intro_h
-            + 16.0
+            + 22.0
             + if whats_new_h > 0.0 {
-                32.0 + whats_new_h + 16.0
+                34.0 + whats_new_h + 22.0
             } else {
                 0.0
             }
-            + 30.0
-            + info.len() as f32 * 26.0
-            + 40.0;
+            + 34.0
+            + info.len() as f32 * 28.0
+            + 56.0;
         DetailLayout {
-            intro,
+            intro: body,
             intro_h,
-            whats_new,
+            whats_new: wn,
             whats_new_h,
             info,
             total_h,
         }
     }
 
-    fn max_scroll(&self) -> i32 {
+    fn max_scroll(&mut self) -> i32 {
         let h = self.height as f32;
         match self.mode {
             Mode::Browse => {
                 let cols = self.cols();
                 let rows = self.apps.len().div_ceil(cols);
                 let content = rows as f32 * (CARD_H + GAP);
-                let visible = (h - STATUS_H - TOP_H - 90.0).max(0.0);
+                let visible = (h - STATUS_H - TOP_H - HERO_H - 66.0).max(0.0);
                 (content - visible).max(0.0) as i32
             }
             Mode::Updates => self.update_max_scroll(),
+            Mode::Downloads => self.dl_max_scroll(),
             Mode::Detail => {
                 let layout = self.detail_layout(self.width as f32);
-                let visible = (h - STATUS_H - TOP_H - 250.0).max(0.0);
+                let visible = (h - STATUS_H - DETAIL_BODY_TOP).max(0.0);
                 (layout.total_h - visible).max(0.0) as i32
             }
         }
+    }
+
+    /// A thin, always-visible scroll indicator on every scrollable page.
+    fn draw_scrollbar(&mut self, w: f32, h: f32) {
+        let max = self.max_scroll() as f32;
+        if max <= 0.0 {
+            return;
+        }
+        let p = self.gfx.pal;
+        let top = TOP_H + 14.0;
+        let track_h = (h - STATUS_H - 16.0 - top).max(20.0);
+        let thumb_h = (track_h * track_h / (track_h + max)).max(32.0);
+        let t = (self.scroll as f32 / max).clamp(0.0, 1.0);
+        let ty = top + (track_h - thumb_h) * t;
+        self.gfx.round(
+            gfx::rect(w - 10.0, ty, w - 6.0, ty + thumb_h),
+            2.0,
+            p.subtle,
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -691,33 +791,50 @@ impl AppState {
         match self.mode {
             Mode::Detail => self.render_detail(w, h),
             Mode::Updates => self.render_updates(w, h),
+            Mode::Downloads => self.render_downloads(w, h),
             Mode::Browse => self.render_browse(w, h),
         }
+        self.draw_scrollbar(w, h);
         self.gfx.pop_clip();
 
-        // Status bar
+        // Status bar: message on the left, live download progress in the
+        // middle and a permanent shortcut into the download centre.
         self.gfx.fill(gfx::rect(0.0, h - STATUS_H, w, h), p.status);
         self.gfx.fill(
             gfx::rect(0.0, h - STATUS_H, w, h - STATUS_H + 1.0),
             p.border,
         );
-        let status_w = (w - 190.0).max(120.0);
+        let status_w = (w - 430.0).max(160.0);
+        let status = self.status.clone();
         self.gfx.text(
-            &self.status,
-            gfx::rect(16.0, h - STATUS_H + 2.0, status_w, h - 4.0),
+            &status,
+            gfx::rect(16.0, h - STATUS_H, status_w, h),
             11,
             false,
             p.sub,
         );
-        let version_label = format!("MindosShop v{}", env!("CARGO_PKG_VERSION"));
-        self.gfx.text(
-            &version_label,
-            gfx::rect(w - 180.0, h - STATUS_H + 2.0, w - 16.0, h - 4.0),
-            10,
+        self.render_status_progress(w, h);
+        let sr = Self::status_dl_rect(w, h);
+        let active = self.active_count();
+        draw_button(
+            &mut self.gfx,
+            p,
+            sr,
+            &if active > 0 {
+                format!("下载 {}", active)
+            } else {
+                "下载管理".into()
+            },
+            self.mode == Mode::Downloads,
+            self.hover == Some((HIT_DL_NAV, 0)),
             false,
-            p.sub,
         );
-        self.gfx.end();
+        // Present also recovers from a lost D2D device.
+        self.gfx.present();
+    }
+
+    fn status_dl_rect(w: f32, h: f32) -> D2D_RECT_F {
+        gfx::rect(w - 182.0, h - STATUS_H + 6.0, w - 16.0, h - 6.0)
     }
 
     fn render_header(&mut self, w: f32) {
@@ -726,20 +843,27 @@ impl AppState {
         self.gfx
             .fill(gfx::rect(0.0, TOP_H - 1.0, w, TOP_H), p.border);
 
-        let logo = gfx::rect(22.0, 18.0, 52.0, 48.0);
-        self.gfx.round(logo, 9.0, p.accent);
-        self.gfx.center_text("M", logo, 16, true, p.on_accent);
+        let logo = gfx::rect(20.0, 18.0, 56.0, 54.0);
+        self.gfx.round(logo, 10.0, p.accent);
+        self.gfx.center_text("M", logo, 18, true, p.on_accent);
         self.gfx.text(
             "MindosShop",
-            gfx::rect(64.0, 12.0, 240.0, 56.0),
+            gfx::rect(66.0, 12.0, 240.0, 38.0),
             17,
             true,
             p.text,
         );
+        self.gfx.text(
+            "发现 · 获取 · 更新",
+            gfx::rect(66.0, 36.0, 240.0, 58.0),
+            10,
+            false,
+            p.sub,
+        );
 
         let search_l = 252.0;
         let search_r = (w - 116.0).max(search_l + 140.0);
-        let sr = gfx::rect(search_l, 16.0, search_r, 52.0);
+        let sr = gfx::rect(search_l, 18.0, search_r, 54.0);
         self.gfx.round(sr, 9.0, p.bg);
         self.gfx.outline(
             sr,
@@ -757,7 +881,7 @@ impl AppState {
         };
         self.gfx.text(
             &shown,
-            gfx::rect(search_l + 14.0, 17.0, search_r - 12.0, 51.0),
+            gfx::rect(search_l + 14.0, 19.0, search_r - 12.0, 53.0),
             13,
             false,
             if self.search.is_empty() {
@@ -767,8 +891,12 @@ impl AppState {
             },
         );
         if self.focus_search {
-            let cx = search_l + 14.0 + estimate_width(&shown, 13);
-            self.gfx.fill(gfx::rect(cx, 22.0, cx + 1.2, 46.0), p.accent);
+            let cx = search_l + 14.0 + self.gfx.measure_width(&shown, 13, false) + 1.0;
+            let right = (search_r - 10.0).max(cx);
+            self.gfx.fill(
+                gfx::rect(cx.min(right), 22.0, cx.min(right) + 1.2, 46.0),
+                p.accent,
+            );
         }
         let br = Self::search_button_rect(w);
         draw_button(
@@ -788,33 +916,37 @@ impl AppState {
             .fill(gfx::rect(0.0, TOP_H, NAV_W, h - STATUS_H), p.panel);
         self.gfx
             .fill(gfx::rect(NAV_W - 1.0, TOP_H, NAV_W, h - STATUS_H), p.border);
-        self.gfx.text(
-            "发现",
-            gfx::rect(20.0, TOP_H + 8.0, NAV_W - 16.0, TOP_H + 28.0),
-            10,
-            true,
-            p.sub,
-        );
-        self.gfx.text(
-            "管理",
-            gfx::rect(20.0, TOP_H + 74.0, NAV_W - 16.0, TOP_H + 94.0),
-            10,
-            true,
-            p.sub,
-        );
-        if self.nav.len() > 2 {
-            self.gfx.text(
-                "分类",
-                gfx::rect(20.0, TOP_H + 140.0, NAV_W - 16.0, TOP_H + 160.0),
-                10,
-                true,
-                p.sub,
-            );
-        }
-        for (i, n) in self.nav.iter().enumerate() {
-            let r = Self::nav_rect(i);
-            if r.top > h - STATUS_H - 8.0 {
+        let rects: Vec<D2D_RECT_F> = (0..self.nav.len()).map(|i| self.nav_rect(i)).collect();
+        let active_downloads = self.active_count();
+        let labels: Vec<String> = self.nav.iter().map(|n| n.label.clone()).collect();
+        let groups: Vec<u8> = self.nav.iter().map(|n| n.group).collect();
+        let badges: Vec<usize> = self
+            .nav
+            .iter()
+            .map(|n| match n.kind {
+                NavKind::Updates => self.updates.len(),
+                NavKind::Downloads => active_downloads,
+                NavKind::Browse => 0,
+            })
+            .collect();
+        // Reserve the footer band: without this the last category row was
+        // drawn straight through the version label on short windows.
+        let footer_top = h - STATUS_H - 40.0;
+        let mut prev_group = u8::MAX;
+        for i in 0..self.nav.len() {
+            let r = rects[i];
+            if r.bottom > footer_top {
                 break;
+            }
+            if groups[i] != prev_group {
+                prev_group = groups[i];
+                self.gfx.text(
+                    Self::group_title(groups[i]),
+                    gfx::rect(20.0, r.top - 20.0, NAV_W - 16.0, r.top - 2.0),
+                    10,
+                    true,
+                    p.sub,
+                );
             }
             let active = i == self.active_nav;
             let hovered = self.hover == Some((HIT_NAV, i));
@@ -830,48 +962,122 @@ impl AppState {
                     p.accent,
                 );
             }
+            let badge_count = badges[i];
+            let label_right = if badge_count > 0 {
+                r.right - 40.0
+            } else {
+                r.right - 12.0
+            };
             self.gfx.text(
-                &ellipsize(&n.label, r.right - 40.0, 13),
-                gfx::rect(26.0, r.top, r.right - 34.0, r.bottom),
+                &labels[i],
+                gfx::rect(26.0, r.top, label_right, r.bottom),
                 13,
                 active,
                 if active { p.accent } else { p.text },
             );
-            if n.kind == NavKind::Updates && !self.updates.is_empty() {
-                let badge = gfx::rect(r.right - 30.0, r.top + 7.0, r.right - 8.0, r.top + 27.0);
+            if badge_count > 0 {
+                let badge = gfx::rect(r.right - 34.0, r.top + 7.0, r.right - 8.0, r.top + 27.0);
                 self.gfx.round(badge, 10.0, p.accent);
-                self.gfx.center_text(
-                    &self.updates.len().to_string(),
-                    badge,
-                    10,
-                    true,
-                    p.on_accent,
-                );
+                self.gfx
+                    .center_text(&badge_count.to_string(), badge, 10, true, p.on_accent);
             }
         }
-    }
-
-    fn render_browse(&mut self, w: f32, h: f32) {
-        let p = self.gfx.pal;
-        let title = if self.loading {
-            "加载中…".to_string()
-        } else {
-            self.list_title.clone()
-        };
-        self.gfx.text(
-            &title,
-            gfx::rect(NAV_W + PAD, TOP_H + 12.0, w - PAD, TOP_H + 44.0),
-            19,
-            true,
-            p.text,
+        self.gfx.fill(
+            gfx::rect(12.0, footer_top, NAV_W - 12.0, footer_top + 1.0),
+            p.border,
         );
+        let version = format!("MindosShop v{}", env!("CARGO_PKG_VERSION"));
         self.gfx.text(
-            &format!("共 {} 款应用  ·  纯净模式", self.apps.len()),
-            gfx::rect(NAV_W + PAD, TOP_H + 44.0, w - PAD, TOP_H + 68.0),
-            11,
+            &version,
+            gfx::rect(20.0, footer_top + 4.0, NAV_W - 16.0, h - STATUS_H - 6.0),
+            10,
             false,
             p.sub,
         );
+    }
+
+    fn render_browse(&mut self, w: f32, _h: f32) {
+        let p = self.gfx.pal;
+        let title = if self.loading {
+            "正在连接应用目录…".to_string()
+        } else {
+            self.list_title.clone()
+        };
+
+        // Featured banner — the store-like landing area, with a shortcut to
+        // the download centre so progress is never more than one click away.
+        let hero = gfx::rect(NAV_W + PAD, TOP_H + 14.0, w - PAD, TOP_H + 14.0 + HERO_H);
+        if hero.right > hero.left + 200.0 {
+            self.gfx.round(hero, 16.0, p.accent_soft);
+            self.gfx.outline(hero, p.border, 0.8);
+            // Three non-overlapping columns: title/subtitle | stats | action.
+            let btn = Self::hero_dl_rect(w);
+            let stat_right = btn.left - 20.0;
+            let stat_left = stat_right - 150.0;
+            let text_right = stat_left - 20.0;
+            self.gfx.text(
+                &title,
+                gfx::rect(
+                    hero.left + 24.0,
+                    hero.top + 12.0,
+                    text_right,
+                    hero.top + 48.0,
+                ),
+                19,
+                true,
+                p.text,
+            );
+            self.gfx.text(
+                "无广告  ·  无遥测  ·  纯净官方目录",
+                gfx::rect(
+                    hero.left + 24.0,
+                    hero.top + 48.0,
+                    text_right,
+                    hero.top + 74.0,
+                ),
+                11,
+                false,
+                p.sub,
+            );
+            self.gfx.text(
+                &format!("{} 款应用", self.apps.len()),
+                gfx::rect(stat_left, hero.top + 16.0, stat_right, hero.top + 46.0),
+                15,
+                true,
+                p.accent,
+            );
+            self.gfx.text(
+                &format!(
+                    "{} 个分类  ·  {} 个可更新",
+                    self.nav.len().saturating_sub(3),
+                    self.updates.len()
+                ),
+                gfx::rect(stat_left, hero.top + 46.0, stat_right, hero.top + 70.0),
+                11,
+                false,
+                p.sub,
+            );
+            draw_button(
+                &mut self.gfx,
+                p,
+                btn,
+                "下载管理",
+                false,
+                self.hover == Some((HIT_DL_NAV, 0)),
+                false,
+            );
+        }
+
+        // Resolve task states up front: rendering needs &mut gfx while the
+        // task list is borrowed immutably.
+        let states: Vec<Option<(DlState, f32, String)>> = self
+            .apps
+            .iter()
+            .map(|a| {
+                self.task_for(&a.name)
+                    .map(|t| (t.state, t.frac(), t.percent()))
+            })
+            .collect();
 
         for (i, a) in self.apps.iter().enumerate() {
             let Some(card) = self.card_rect(i) else {
@@ -881,76 +1087,179 @@ impl AppState {
             let (x0, y0, x1, y1) = card;
             self.gfx.round(
                 gfx::rect(x0, y0, x1, y1),
-                12.0,
+                14.0,
                 if hovered { p.hover } else { p.card },
             );
             self.gfx.outline(
                 gfx::rect(x0, y0, x1, y1),
-                p.border,
-                if hovered { 1.2 } else { 0.8 },
+                if hovered { p.accent } else { p.border },
+                if hovered { 1.4 } else { 0.9 },
             );
 
-            let icon = gfx::rect(x0 + 16.0, y0 + 16.0, x0 + 72.0, y0 + 72.0);
+            let icon = gfx::rect(x0 + 16.0, y0 + 16.0, x0 + 80.0, y0 + 80.0);
             let key = a.logo_url().unwrap_or("");
             if !self.gfx.bitmap(key, icon) {
-                self.gfx.round(icon, 12.0, p.accent_soft);
+                self.gfx.round(icon, 14.0, p.accent_soft);
                 let ch: String = a.name.chars().take(1).collect();
-                self.gfx.center_text(&ch, icon, 22, true, p.accent);
+                self.gfx.center_text(&ch, icon, 24, true, p.accent);
             }
 
-            let tx = x0 + 84.0;
-            self.gfx.text(
-                &ellipsize(&a.name, x1 - 14.0 - tx, 14),
-                gfx::rect(tx, y0 + 14.0, x1 - 14.0, y0 + 38.0),
-                14,
-                true,
-                p.text,
+            let name_r = Self::card_name_rect(card);
+            self.gfx.text(&a.name, name_r, 15, true, p.text);
+            let desc_r = Self::card_desc_rect(card);
+            let desc = a.subtitle();
+            self.gfx.paragraph(&desc, desc_r, 12, false, p.sub, 2);
+            self.gfx.fill(
+                gfx::rect(x0 + 16.0, y0 + 88.0, x1 - 16.0, y0 + 89.0),
+                p.border,
             );
-            let desc = clip_lines(&a.subtitle(), x1 - 14.0 - tx - 4.0, 12, 2);
+
+            // Rating chip + price / size / install count, sized with real
+            // DirectWrite metrics rather than per-character guesses.
+            let meta_r = Self::card_meta_rect(card);
+            let score = a.score_text();
+            let mut cx = meta_r.left;
+            if !score.is_empty() {
+                let label = format!("★ {}", score);
+                let cw = (self.gfx.measure_width(&label, 11, true) + 18.0)
+                    .min(meta_r.right - meta_r.left - 8.0);
+                self.gfx.round(
+                    gfx::rect(cx, meta_r.top + 1.0, cx + cw, meta_r.bottom - 1.0),
+                    9.0,
+                    p.accent_soft,
+                );
+                self.gfx.text(
+                    &label,
+                    gfx::rect(cx + 7.0, meta_r.top, cx + cw - 5.0, meta_r.bottom),
+                    11,
+                    true,
+                    p.accent,
+                );
+                cx += cw + 8.0;
+            }
+            let meta = a.meta();
+            let price_line = if meta.is_empty() {
+                "免费".to_string()
+            } else {
+                format!("免费  ·  {}", meta)
+            };
             self.gfx.text(
-                &desc,
-                gfx::rect(tx, y0 + 40.0, x1 - 14.0, y0 + 80.0),
-                12,
+                &price_line,
+                gfx::rect(cx, meta_r.top, meta_r.right, meta_r.bottom),
+                11,
                 false,
                 p.sub,
             );
 
             let ir = Self::install_rect(card);
-            self.gfx.text(
-                &ellipsize(&a.meta(), ir.left - 10.0 - (x0 + 16.0), 11),
-                gfx::rect(x0 + 16.0, y0 + 88.0, ir.left - 10.0, y0 + 110.0),
-                11,
-                false,
-                p.sub,
-            );
+            let task = states.get(i).and_then(|x| x.as_ref());
+            if let Some((state, frac, pct)) = task {
+                downloads::progress_bar(
+                    &mut self.gfx,
+                    p,
+                    Self::card_bar_rect(card),
+                    *frac,
+                    if *state == DlState::Failed {
+                        p.danger
+                    } else {
+                        p.accent
+                    },
+                );
+                let text = match state {
+                    DlState::Downloading => format!("{}  ·  下载中", pct),
+                    DlState::Queued => "等待下载…".into(),
+                    DlState::Done => "已下载到 Downloads".into(),
+                    DlState::Failed => "下载失败，可重试".into(),
+                    DlState::Canceled => "已取消，可重试".into(),
+                };
+                self.gfx.text(
+                    &text,
+                    Self::card_status_rect(card),
+                    11,
+                    false,
+                    if *state == DlState::Failed {
+                        p.danger
+                    } else if *state == DlState::Done {
+                        p.accent
+                    } else {
+                        p.sub
+                    },
+                );
+            } else {
+                self.gfx.text(
+                    "官方目录  ·  安全下载",
+                    Self::card_status_rect(card),
+                    11,
+                    false,
+                    p.sub,
+                );
+            }
+            let label = match task.map(|t| t.0) {
+                Some(DlState::Downloading | DlState::Queued) => "取消",
+                Some(DlState::Done) => "打开",
+                Some(DlState::Failed | DlState::Canceled) => "重试",
+                None => "获取",
+            };
             draw_button(
                 &mut self.gfx,
                 p,
                 ir,
-                "安装",
+                label,
                 true,
                 self.hover == Some((HIT_INSTALL, i)),
                 false,
             );
         }
         if self.apps.is_empty() && !self.loading {
-            self.gfx.center_text(
+            let card = gfx::rect(
+                NAV_W + PAD,
+                TOP_H + HERO_H + 40.0,
+                w - PAD,
+                TOP_H + HERO_H + 168.0,
+            );
+            self.gfx.round(card, 16.0, p.accent_soft);
+            self.gfx.outline(card, p.border, 0.8);
+            self.gfx.text(
                 "没有找到应用",
-                gfx::rect(NAV_W, TOP_H + 90.0, w, h - STATUS_H),
-                16,
+                gfx::rect(
+                    card.left + 28.0,
+                    card.top + 24.0,
+                    card.right - 28.0,
+                    card.top + 62.0,
+                ),
+                17,
+                true,
+                p.text,
+            );
+            self.gfx.text(
+                "换个关键词试试，或从左侧选择一个分类",
+                gfx::rect(
+                    card.left + 28.0,
+                    card.top + 64.0,
+                    card.right - 28.0,
+                    card.top + 96.0,
+                ),
+                12,
                 false,
                 p.sub,
             );
         }
     }
 
-    fn render_detail(&mut self, w: f32, h: f32) {
+    fn render_detail(&mut self, w: f32, _h: f32) {
         let p = self.gfx.pal;
         let Some(a) = self.apps.get(self.detail_index).cloned() else {
             return;
         };
-        let d = self.detail_extra.as_ref();
+        let d = self.detail_extra.clone();
+        let task = self
+            .task_for(&a.name)
+            .map(|t| (t.state, t.frac(), t.percent()));
 
+        // Hero card: big icon, identity, metadata and one prominent action.
+        let hero = gfx::rect(NAV_W + PAD, DETAIL_HERO_TOP, w - PAD, DETAIL_HERO_BOTTOM);
+        self.gfx.round(hero, 18.0, p.accent_soft);
+        self.gfx.outline(hero, p.border, 0.8);
         draw_button(
             &mut self.gfx,
             p,
@@ -962,29 +1271,30 @@ impl AppState {
         );
 
         let icon = gfx::rect(
-            NAV_W + PAD + 4.0,
-            TOP_H + 66.0,
-            NAV_W + PAD + 100.0,
-            TOP_H + 162.0,
+            hero.left + 24.0,
+            hero.top + 54.0,
+            hero.left + 120.0,
+            hero.top + 150.0,
         );
         let key = a.logo_url().unwrap_or("");
         if !self.gfx.bitmap(key, icon) {
-            self.gfx.round(icon, 18.0, p.accent_soft);
+            self.gfx.round(icon, 20.0, p.accent_soft);
             let ch: String = a.name.chars().take(1).collect();
-            self.gfx.center_text(&ch, icon, 42, true, p.accent);
+            self.gfx.center_text(&ch, icon, 44, true, p.accent);
         }
 
-        let tx = NAV_W + PAD + 128.0;
-        let right = (w - PAD).max(tx + 200.0);
+        let tx = hero.left + 140.0;
+        let right = w - PAD - 214.0;
         self.gfx.text(
-            &ellipsize(&a.name, right - tx, 23),
-            gfx::rect(tx, TOP_H + 68.0, right, TOP_H + 106.0),
-            23,
+            &a.name,
+            gfx::rect(tx, hero.top + 48.0, right, hero.top + 88.0),
+            24,
             true,
             p.text,
         );
         let mut meta: Vec<String> = Vec::new();
         if let Some(v) = d
+            .as_ref()
             .and_then(|x| x.version.clone())
             .or_else(|| a.version.clone())
             .filter(|s| !s.trim().is_empty())
@@ -996,105 +1306,139 @@ impl AppState {
             meta.push(m);
         }
         self.gfx.text(
-            &ellipsize(&meta.join("  ·  "), right - tx, 12),
-            gfx::rect(tx, TOP_H + 110.0, right, TOP_H + 134.0),
+            &meta.join("  ·  "),
+            gfx::rect(tx, hero.top + 92.0, right, hero.top + 114.0),
             12,
             false,
             p.sub,
         );
-        let score = d.map(|x| x.score_text()).unwrap_or_else(|| a.score_text());
-        let dev = d.map(|x| x.developer_name()).unwrap_or_default();
+        let score = d
+            .as_ref()
+            .map(|x| x.score_text())
+            .unwrap_or_else(|| a.score_text());
+        let dev = d.as_ref().map(|x| x.developer_name()).unwrap_or_default();
         let mut secondary = Vec::new();
         if !score.is_empty() {
-            secondary.push(format!("评分 {}", score));
+            secondary.push(format!("★ {} 分", score));
         }
         if !dev.is_empty() {
             secondary.push(dev);
         }
-        if !secondary.is_empty() {
+        secondary.push("免费".into());
+        self.gfx.text(
+            &secondary.join("  ·  "),
+            gfx::rect(tx, hero.top + 118.0, right, hero.top + 140.0),
+            12,
+            false,
+            p.sub,
+        );
+
+        let hint = Self::detail_progress_text_rect(w);
+        if let Some((state, _frac, pct)) = &task {
             self.gfx.text(
-                &secondary.join("  ·  "),
-                gfx::rect(tx, TOP_H + 138.0, right, TOP_H + 160.0),
-                12,
+                &format!("{}  ·  进度已同步到下载管理", pct),
+                hint,
+                11,
                 false,
-                p.sub,
+                if *state == DlState::Failed {
+                    p.danger
+                } else {
+                    p.accent
+                },
             );
+        } else {
+            self.gfx
+                .text("获取后保存到 Downloads", hint, 11, false, p.sub);
         }
+        let label = match task.as_ref().map(|t| t.0) {
+            Some(DlState::Downloading | DlState::Queued) => "取消",
+            Some(DlState::Done) => "打开位置",
+            Some(DlState::Failed | DlState::Canceled) => "重试",
+            None => "获取",
+        };
         draw_button(
             &mut self.gfx,
             p,
-            Self::download_rect(),
-            "下载安装",
+            Self::download_rect(w),
+            label,
             true,
             self.hover == Some((HIT_DOWNLOAD, 0)),
             false,
         );
+        if let Some((state, frac, _pct)) = task {
+            downloads::progress_bar(
+                &mut self.gfx,
+                p,
+                Self::download_progress_rect(w),
+                frac,
+                if state == DlState::Failed {
+                    p.danger
+                } else {
+                    p.accent
+                },
+            );
+        }
         self.gfx.fill(
-            gfx::rect(NAV_W + PAD, TOP_H + 226.0, w - PAD, TOP_H + 227.0),
+            gfx::rect(
+                NAV_W + PAD,
+                DETAIL_DIVIDER_Y,
+                w - PAD,
+                DETAIL_DIVIDER_Y + 1.0,
+            ),
             p.border,
         );
 
-        // Scrolling body. A tall rect lets DrawText render every line while
-        // the axis-aligned clip confines it to the content pane.
+        // Scrolling body: heights come from the same measured layouts that are
+        // drawn, so a long description pushes the following sections down
+        // instead of painting on top of them.
         let layout = self.detail_layout(w);
         let x0 = NAV_W + PAD;
-        let x1 = (w - PAD - 10.0).max(x0 + 180.0);
-        let mut y = TOP_H + 244.0 - self.scroll as f32;
+        let cw = Self::detail_text_width(w);
+        let x1 = x0 + cw;
+        let mut y = DETAIL_BODY_TOP - self.scroll as f32;
 
+        self.section_title("应用简介", x0, y, x1);
+        y += 34.0;
+        let intro_r = gfx::rect(x0, y, x1, y + layout.intro_h + 2.0);
         self.gfx
-            .text("应用简介", gfx::rect(x0, y, x1, y + 26.0), 15, true, p.text);
-        y += 32.0;
-        self.gfx.text(
-            &layout.intro,
-            gfx::rect(x0, y, x1, y + layout.intro_h + 40.0),
-            13,
-            false,
-            p.text,
-        );
-        y += layout.intro_h + 16.0;
+            .paragraph(&layout.intro, intro_r, 13, false, p.text, 0);
+        y += layout.intro_h + 22.0;
 
         if layout.whats_new_h > 0.0 {
+            self.section_title("本次更新", x0, y, x1);
+            y += 34.0;
+            let wn_r = gfx::rect(x0, y, x1, y + layout.whats_new_h + 2.0);
             self.gfx
-                .text("本次更新", gfx::rect(x0, y, x1, y + 26.0), 15, true, p.text);
-            y += 32.0;
-            self.gfx.text(
-                &layout.whats_new,
-                gfx::rect(x0, y, x1, y + layout.whats_new_h + 40.0),
-                13,
-                false,
-                p.sub,
-            );
-            y += layout.whats_new_h + 16.0;
+                .paragraph(&layout.whats_new, wn_r, 13, false, p.sub, 0);
+            y += layout.whats_new_h + 22.0;
         }
 
         if !layout.info.is_empty() {
-            self.gfx
-                .text("应用信息", gfx::rect(x0, y, x1, y + 26.0), 15, true, p.text);
-            y += 30.0;
+            self.section_title("应用信息", x0, y, x1);
+            y += 34.0;
             for (k, v) in &layout.info {
                 self.gfx
-                    .text(k, gfx::rect(x0, y, x0 + 110.0, y + 24.0), 12, false, p.sub);
-                self.gfx.text(
-                    &ellipsize(v, x1 - x0 - 120.0, 12),
-                    gfx::rect(x0 + 120.0, y, x1, y + 24.0),
-                    12,
-                    false,
-                    p.text,
-                );
-                y += 26.0;
+                    .text(k, gfx::rect(x0, y, x0 + 110.0, y + 26.0), 12, false, p.sub);
+                self.gfx
+                    .text(v, gfx::rect(x0 + 120.0, y, x1, y + 26.0), 12, false, p.text);
+                self.gfx
+                    .fill(gfx::rect(x0, y + 26.0, x1, y + 27.0), p.border);
+                y += 28.0;
             }
         }
+    }
 
-        let max = self.max_scroll() as f32;
-        if max > 0.0 {
-            let track_top = TOP_H + 238.0;
-            let track_h = (h - STATUS_H - 16.0 - track_top).max(20.0);
-            let thumb_h = (track_h * track_h / (track_h + max)).max(28.0);
-            let t = (self.scroll as f32 / max).clamp(0.0, 1.0);
-            let ty = track_top + (track_h - thumb_h) * t;
-            self.gfx
-                .round(gfx::rect(w - 9.0, ty, w - 5.0, ty + thumb_h), 2.0, p.subtle);
-        }
+    fn section_title(&mut self, label: &str, x0: f32, y: f32, x1: f32) {
+        let p = self.gfx.pal;
+        self.gfx
+            .round(gfx::rect(x0, y + 3.0, x0 + 3.0, y + 21.0), 1.5, p.accent);
+        self.gfx.text(
+            label,
+            gfx::rect(x0 + 14.0, y, x1, y + 26.0),
+            15,
+            true,
+            p.text,
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1115,11 +1459,14 @@ impl AppState {
             return None;
         }
         if y > h - STATUS_H {
+            if in_rect(x, y, Self::status_dl_rect(w, h)) || downloads::status_hit(self, x, y) {
+                return Some((HIT_DL_NAV, 0));
+            }
             return None;
         }
         if x < NAV_W {
             for i in 0..self.nav.len() {
-                if in_rect(x, y, Self::nav_rect(i)) {
+                if in_rect(x, y, self.nav_rect(i)) {
                     return Some((HIT_NAV, i));
                 }
             }
@@ -1130,13 +1477,17 @@ impl AppState {
                 if in_rect(x, y, Self::back_rect()) {
                     return Some((HIT_BACK, 0));
                 }
-                if in_rect(x, y, Self::download_rect()) {
+                if in_rect(x, y, Self::download_rect(w)) {
                     return Some((HIT_DOWNLOAD, 0));
                 }
                 None
             }
             Mode::Updates => updates_ui::hit_targets(self, x, y),
+            Mode::Downloads => downloads::hit_targets(self, x, y),
             Mode::Browse => {
+                if in_rect(x, y, Self::hero_dl_rect(w)) {
+                    return Some((HIT_DL_NAV, 0));
+                }
                 for i in 0..self.apps.len() {
                     if let Some(c) = self.card_rect(i)
                         && x >= c.0
@@ -1179,6 +1530,23 @@ impl AppState {
             }
             Some((HIT_INSTALL, i)) => self.start_download(i),
             Some((HIT_CARD, i)) => self.open_detail(i),
+            Some((HIT_DL_NAV, _)) => {
+                if let Some(i) = self.nav.iter().position(|n| n.kind == NavKind::Downloads) {
+                    self.active_nav = i;
+                }
+                self.mode = Mode::Downloads;
+                self.scroll = 0;
+                self.focus_search = false;
+                self.status = format!(
+                    "下载管理  ·  {} 个任务  ·  {} 个进行中",
+                    self.downloads.len(),
+                    self.active_count()
+                );
+                self.invalidate();
+            }
+            Some((kind, i)) if (HIT_DL_CANCEL..=HIT_DL_CLEAR).contains(&kind) => {
+                downloads::apply(self, kind, i);
+            }
             Some((kind, i)) if (HIT_CHECK..=HIT_ROW).contains(&kind) => {
                 updates_ui::apply(self, kind, i);
             }
@@ -1199,12 +1567,36 @@ impl AppState {
             }
             WM_ERASEBKGND => Some(LRESULT(1)),
             WM_SIZE => {
-                self.width = (lparam.0 as u32) & 0xFFFF;
-                self.height = ((lparam.0 as u32) >> 16) & 0xFFFF;
-                if self.width > 0 && self.height > 0 {
-                    self.gfx.resize(self.width, self.height);
-                    self.invalidate();
+                // Sizes here are physical pixels. `render()` derives the DIP
+                // size from the client rect + current scale; writing physical
+                // pixels into width/height made every hit-test wrong after a
+                // resize until a later repaint happened to correct it.
+                let cw = (lparam.0 as u32) & 0xFFFF;
+                let ch = ((lparam.0 as u32) >> 16) & 0xFFFF;
+                if cw > 0 && ch > 0 {
+                    self.gfx.resize(cw, ch);
                 }
+                self.invalidate();
+                Some(LRESULT(0))
+            }
+            WM_DPICHANGED => {
+                let dpi = (wparam.0 & 0xFFFF) as f32;
+                self.gfx.set_dpi(dpi.max(96.0), dpi.max(96.0));
+                if lparam.0 != 0 {
+                    let r = lparam.0 as *const RECT;
+                    unsafe {
+                        let _ = SetWindowPos(
+                            self.hwnd,
+                            None,
+                            (*r).left,
+                            (*r).top,
+                            (*r).right - (*r).left,
+                            (*r).bottom - (*r).top,
+                            SWP_NOZORDER | SWP_NOACTIVATE,
+                        );
+                    }
+                }
+                self.invalidate();
                 Some(LRESULT(0))
             }
             WM_GETMINMAXINFO => {
@@ -1275,6 +1667,13 @@ impl AppState {
                 }
                 27 => {
                     self.mode = Mode::Browse;
+                    if self
+                        .nav
+                        .get(self.active_nav)
+                        .is_some_and(|n| n.kind != NavKind::Browse)
+                    {
+                        self.active_nav = 0;
+                    }
                     self.scroll = 0;
                     self.focus_search = false;
                     self.invalidate();
@@ -1287,7 +1686,8 @@ impl AppState {
             | WM_APP_ICON
             | WM_APP_DETAIL
             | WM_APP_STATUS
-            | WM_APP_DONE
+            | WM_APP_DL_PROGRESS
+            | WM_APP_DL_DONE
             | WM_APP_UPDATE_PROGRESS
             | WM_APP_UPDATE_DONE => {
                 self.on_payload(msg, lparam);
@@ -1333,14 +1733,11 @@ impl AppState {
             }
             (WM_APP_ICON, Payload::Icon { key, bytes }) => {
                 self.pending_icons.remove(&key);
-                if !bytes.is_empty() {
-                    if self.gfx.icons.len() >= 200 {
-                        self.gfx.icons.clear();
-                    }
-                    if let Some(bmp) = self.gfx.decode_icon(&bytes) {
-                        self.gfx.icons.insert(key, bmp);
-                        self.invalidate();
-                    }
+                if !bytes.is_empty()
+                    && let Some(bmp) = self.gfx.decode_icon(&bytes)
+                {
+                    self.gfx.put_icon(key, bmp);
+                    self.invalidate();
                 }
             }
             (WM_APP_DETAIL, Payload::Detail(Ok(d), epoch)) => {
@@ -1360,20 +1757,16 @@ impl AppState {
                 self.status = s;
                 self.invalidate();
             }
-            (WM_APP_DONE, Payload::Done(result, for_update)) => {
-                self.status = match (result, for_update) {
-                    (Ok(path), true) => format!(
-                        "更新包已下载：{} — 请在 Downloads 中运行安装程序完成更新",
-                        short_path(&path)
-                    ),
-                    (Ok(path), false) => format!(
-                        "下载完成：{} — 请在 Downloads 中运行安装程序",
-                        short_path(&path)
-                    ),
-                    (Err(e), _) => format!("下载失败：{}", e),
-                };
-                self.invalidate();
-            }
+            (
+                WM_APP_DL_PROGRESS,
+                Payload::DlProgress {
+                    id,
+                    done,
+                    total,
+                    speed,
+                },
+            ) => self.on_dl_progress(id, done, total, speed),
+            (WM_APP_DL_DONE, Payload::DlDone { id, result }) => self.on_dl_done(id, result),
             (WM_APP_UPDATE_PROGRESS, Payload::UpdateProgress(d, t)) => {
                 self.on_update_progress(d, t)
             }
@@ -1429,49 +1822,172 @@ mod tests {
         a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
     }
 
-    /// Regression for "description text covered by the install button".
+    /// Every card text band is disjoint from every other band and from the
+    /// action button — the renderer and these tests use the same helpers.
     #[test]
-    fn card_text_never_overlaps_the_install_button() {
-        let card = (0.0, 0.0, CARD_W, CARD_H);
-        let install = AppState::install_rect(card);
-        let tx = 84.0;
-        let name = gfx::rect(tx, 14.0, CARD_W - 14.0, 38.0);
-        let desc = gfx::rect(tx, 40.0, CARD_W - 14.0, 80.0);
-        let meta = gfx::rect(16.0, 88.0, install.left - 10.0, 110.0);
-        assert!(!overlaps(name, install), "app name overlaps install button");
-        assert!(
-            !overlaps(desc, install),
-            "description overlaps install button"
-        );
-        assert!(!overlaps(meta, install), "metadata overlaps install button");
-        assert!(name.bottom <= desc.top, "name and description overlap");
-        assert!(desc.bottom <= meta.top, "description and metadata overlap");
+    fn card_bands_never_overlap() {
+        for cw in [250.0f32, CARD_W, 420.0] {
+            let card = (0.0, 0.0, cw, CARD_H);
+            let install = AppState::install_rect(card);
+            let bands = [
+                ("name", AppState::card_name_rect(card)),
+                ("description", AppState::card_desc_rect(card)),
+                ("meta chips", AppState::card_meta_rect(card)),
+                ("progress bar", AppState::card_bar_rect(card)),
+                ("progress caption", AppState::card_status_rect(card)),
+            ];
+            for (i, (label, r)) in bands.iter().enumerate() {
+                assert!(r.right > r.left, "cw {cw}: {label} has no width");
+                assert!(
+                    !overlaps(*r, install),
+                    "cw {cw}: {label} overlaps install button"
+                );
+                for (other_label, other) in bands.iter().take(i) {
+                    assert!(
+                        !overlaps(*r, *other),
+                        "cw {cw}: {label} overlaps {other_label}"
+                    );
+                }
+            }
+            assert!(install.bottom <= CARD_H);
+            assert!(bands[4].1.bottom <= CARD_H);
+        }
+    }
+
+    /// The 0.4.0 detail page drew a full-width progress bar through the
+    /// caption text. All hero bands must now be vertically separated.
+    #[test]
+    fn detail_hero_bands_never_overlap() {
+        let w = 1100.0f32;
+        let button = AppState::download_rect(w);
+        let caption = AppState::detail_progress_text_rect(w);
+        let bar = AppState::download_progress_rect(w);
+        assert!(caption.right < button.left, "caption crosses action button");
+        assert!(!overlaps(caption, bar), "caption overlaps progress bar");
+        assert!(!overlaps(button, bar), "button overlaps progress bar");
+        assert!(bar.bottom < DETAIL_HERO_BOTTOM, "bar leaves the hero card");
+        assert!(AppState::back_rect().bottom < DETAIL_HERO_BOTTOM);
     }
 
     #[test]
-    fn detail_header_sits_above_the_scrolling_body() {
-        assert!(AppState::download_rect().bottom < TOP_H + 244.0);
-        assert!(AppState::back_rect().bottom < TOP_H + 66.0);
+    fn detail_body_measurement_matches_drawing_width() {
+        // A mismatch here would make DirectWrite wrap into an extra line that
+        // the reserved height did not account for -> overlapping headings.
+        for w in [1000.0f32, 1100.0, 1600.0] {
+            let cw = AppState::detail_text_width(w);
+            let x0 = NAV_W + PAD;
+            let drawn_right = (w - PAD - 10.0).max(x0 + 180.0);
+            assert!((x0 + cw - drawn_right).abs() < 0.01, "w={w}");
+        }
     }
 
     #[test]
     fn header_search_and_button_do_not_overlap() {
         let w = 1100.0f32;
         let box_r = (w - 116.0).max(392.0);
-        let search = gfx::rect(252.0, 16.0, box_r, 52.0);
+        let search = gfx::rect(252.0, 18.0, box_r, 54.0);
         let button = AppState::search_button_rect(w);
         assert!(!overlaps(search, button));
         assert!(button.right <= w - 16.0);
     }
 
     #[test]
-    fn long_descriptions_are_wrapped_and_clipped() {
-        let long = "这是一款功能非常丰富的应用程序".repeat(12);
-        let wrapped = wrap_text(&long, 180.0, 12);
-        assert!(wrapped.lines().count() > 3);
-        let clipped = clip_lines(&long, 180.0, 12, 2);
-        assert_eq!(clipped.lines().count(), 2);
-        assert!(clipped.ends_with('…'));
-        assert!(ellipsize("超长的应用程序名称示例", 40.0, 14).ends_with('…'));
+    fn banner_columns_are_disjoint() {
+        let w = 1100.0f32;
+        let hero = gfx::rect(NAV_W + PAD, TOP_H + 14.0, w - PAD, TOP_H + 14.0 + HERO_H);
+        let btn = AppState::hero_dl_rect(w);
+        let stat_right = btn.left - 20.0;
+        let stat_left = stat_right - 150.0;
+        let text_right = stat_left - 20.0;
+        assert!(hero.left + 24.0 < text_right);
+        assert!(text_right < stat_left);
+        assert!(stat_left < stat_right);
+        assert!(stat_right < btn.left);
+        assert!(btn.right <= hero.right);
+        assert!(btn.bottom <= hero.bottom);
+        assert!(banner_bottom_for_test(hero) < TOP_H + HERO_H + 28.0);
+    }
+
+    fn banner_bottom_for_test(hero: D2D_RECT_F) -> f32 {
+        hero.bottom
+    }
+
+    #[test]
+    fn banner_leaves_room_for_the_first_card_row() {
+        let banner_bottom = TOP_H + 14.0 + HERO_H;
+        assert!(banner_bottom < TOP_H + HERO_H + 28.0);
+        assert!(TOP_H + HERO_H + 28.0 + CARD_H < MIN_H as f32);
+    }
+
+    #[test]
+    fn nav_footer_is_reserved_below_the_last_row() {
+        let h = 620.0f32;
+        let footer_top = h - STATUS_H - 40.0;
+        let version = gfx::rect(20.0, footer_top + 4.0, NAV_W - 16.0, h - STATUS_H - 6.0);
+        assert!(version.bottom < h - STATUS_H);
+        assert!(footer_top > TOP_H);
+    }
+
+    /// Regression for the screenshot that showed one card and a huge empty
+    /// gutter on a 125%-DPI 1100 px window.
+    #[test]
+    fn columns_fill_the_pane_and_never_leave_a_lone_card() {
+        for w in [760.0f32, 860.0, 1100.0, 1600.0] {
+            let (cols, cw) = layout_columns(w);
+            assert!(cols >= 2, "width {w} produced a single column");
+            let content = w - NAV_W - 2.0 * PAD;
+            let used = cols as f32 * cw + (cols - 1) as f32 * GAP;
+            assert!(
+                (used - content.max(240.0)).abs() < 0.01,
+                "width {w}: cards do not fill the pane"
+            );
+            assert!(cw > 200.0, "width {w}: cards became too narrow");
+        }
+    }
+
+    #[test]
+    fn stretched_narrow_cards_keep_their_action_column() {
+        let cw = 250.0f32;
+        let card = (0.0, 0.0, cw, CARD_H);
+        let install = AppState::install_rect(card);
+        let bar = AppState::card_bar_rect(card);
+        let status = AppState::card_status_rect(card);
+        assert!(bar.right > bar.left && status.right > status.left);
+        assert!(!overlaps(bar, install));
+        assert!(!overlaps(status, install));
+        assert!(install.right <= cw - 10.0);
+    }
+
+    /// Regression for the download row's percentage: the old rect had
+    /// `right < left`, so the number was never painted.
+    #[test]
+    fn download_row_percentage_has_a_real_rectangle() {
+        let r = gfx::rect(NAV_W + PAD, TOP_H + 110.0, 1600.0 - PAD, TOP_H + 210.0);
+        let text_right = r.right - 200.0;
+        let pct = gfx::rect(
+            text_right + 10.0,
+            r.top + 64.0,
+            r.right - 16.0,
+            r.top + 88.0,
+        );
+        assert!(pct.right > pct.left, "percentage rect is inverted");
+        assert!(pct.right - pct.left >= 40.0);
+        let (primary, secondary) = AppState::dl_buttons(r);
+        assert!(!overlaps(pct, primary));
+        assert!(!overlaps(pct, secondary));
+    }
+
+    #[test]
+    fn status_bar_zones_do_not_overlap() {
+        let w = 1100.0f32;
+        let status = gfx::rect(16.0, 0.0, (w - 430.0).max(160.0), STATUS_H);
+        let progress_left = (w - 400.0).max(200.0);
+        let download = AppState::status_dl_rect(w, STATUS_H);
+        assert!(status.right < progress_left);
+        assert!(progress_left + 120.0 < w - 196.0);
+        assert!(
+            w - 196.0 < download.left,
+            "progress overlaps download button"
+        );
     }
 }

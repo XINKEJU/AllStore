@@ -4,6 +4,7 @@
 //! Single executable, one process, no runtime, no browser, no telemetry.
 
 mod app;
+mod downloads;
 mod gfx;
 mod installed;
 mod model;
@@ -18,6 +19,7 @@ use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::UpdateWindow;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::*;
+use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -39,7 +41,11 @@ fn fatal(text: &str) {
 
 fn main() {
     unsafe {
-        SetProcessDPIAware();
+        // Prefer per-monitor DPI v2 so a window dragged between monitors keeps
+        // crisp text; fall back to the legacy system-DPI API on older Windows.
+        if SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2).is_err() {
+            SetProcessDPIAware();
+        }
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
 
         let hmod = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
@@ -115,6 +121,9 @@ fn main() {
 
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = UpdateWindow(hwnd);
+        // Remove stale partial downloads from our own temp folder (never from
+        // the user's Downloads directory).
+        updates_ui::cleanup_temp();
         app::start_load(hwnd.0 as usize);
 
         let mut msg = MSG::default();

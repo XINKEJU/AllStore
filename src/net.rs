@@ -200,6 +200,10 @@ fn query_header(request: *mut c_void, info: u32) -> Option<String> {
 }
 
 type Sink<'a> = Option<&'a mut dyn FnMut(&[u8]) -> bool>;
+/// Called once with Content-Length as soon as the final 2xx headers arrive,
+/// before the body starts streaming. Without it a progress bar has no
+/// denominator until the download is already over.
+type MetaSink<'a> = Option<&'a mut dyn FnMut(u64)>;
 
 struct OneResp {
     status: u32,
@@ -217,6 +221,7 @@ fn one(
     headers: &[(&str, String)],
     body: Option<&[u8]>,
     sink: &mut Sink<'_>,
+    meta: &mut MetaSink<'_>,
 ) -> Result<OneResp, String> {
     unsafe {
         let u = split_url(url)?;
@@ -290,6 +295,12 @@ fn one(
             });
         }
         let success = (200..300).contains(&status);
+        if success
+            && let Some(expected) = content_length
+            && let Some(f) = meta.as_mut()
+        {
+            f(expected);
+        }
 
         let mut bytes = Vec::new();
         let mut total = 0u64;
@@ -349,6 +360,7 @@ fn request(
     headers: &[(&str, String)],
     body: Option<&[u8]>,
     mut sink: Sink<'_>,
+    mut meta: MetaSink<'_>,
 ) -> Result<HttpResponse, String> {
     let streaming = sink.is_some();
     let mut current = url.to_string();
@@ -358,7 +370,14 @@ fn request(
 
     for hop in 0..6 {
         let send_headers: &[(&str, String)] = if hop == 0 { headers } else { &empty };
-        let r = one(&cur_method, &current, send_headers, cur_body, &mut sink)?;
+        let r = one(
+            &cur_method,
+            &current,
+            send_headers,
+            cur_body,
+            &mut sink,
+            &mut meta,
+        )?;
         log(&format!(
             "HTTP {} {} hop={} status={} len={}",
             cur_method,
@@ -424,7 +443,7 @@ fn http(
     headers: &[(&str, String)],
     body: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
-    request(method, url, headers, body, None).map(|r| r.bytes)
+    request(method, url, headers, body, None, None).map(|r| r.bytes)
 }
 
 fn identity_headers(token: &str) -> Vec<(&'static str, String)> {
@@ -547,9 +566,15 @@ pub struct Fetch {
     pub size: u64,
 }
 
-/// Stream an installer to `sink`. Returns `false` from the sink to abort.
-pub fn fetch_binary_ex(url: &str, sink: &mut dyn FnMut(&[u8]) -> bool) -> Result<Fetch, String> {
-    let r = request("GET", url, &[], None, Some(sink))?;
+/// Stream an installer to `sink`, reporting Content-Length as soon as the
+/// final response headers arrive so the UI can draw a real percentage from
+/// byte 0. Returning `false` from the sink aborts the transfer.
+pub fn fetch_binary_stream(
+    url: &str,
+    sink: &mut dyn FnMut(&[u8]) -> bool,
+    meta: &mut dyn FnMut(u64),
+) -> Result<Fetch, String> {
+    let r = request("GET", url, &[], None, Some(sink), Some(meta))?;
     Ok(Fetch {
         final_url: r.final_url,
         size: r.content_length.unwrap_or(0),
@@ -601,7 +626,8 @@ mod tests {
     fn live_download_endpoint_redirects_to_cdn() {
         let url = format!("{}/dlservice/download?softid=L120416", BASE);
         let mut sink: Sink<'_> = None;
-        let r = one("GET", &url, &[], None, &mut sink).expect("request failed");
+        let mut meta: MetaSink<'_> = None;
+        let r = one("GET", &url, &[], None, &mut sink, &mut meta).expect("request failed");
         assert_eq!(r.status, 302, "expected redirect, got {}", r.status);
         let loc = r.location.expect("missing Location header");
         assert!(loc.starts_with("http://"), "unexpected Location: {}", loc);
@@ -624,6 +650,7 @@ mod tests {
                 }
                 false // abort after the first chunk; we only need the signature
             }),
+            None,
         );
         assert!(result.is_err(), "sink abort should surface as an error");
         assert_eq!(&head, b"MZ", "first bytes are not a PE executable");

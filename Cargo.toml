@@ -1,6 +1,6 @@
 [package]
 name = "mindosshop"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2024"
 description = "A pure, lightweight native Windows app store client"
 license = "MIT"
@@ -11,6 +11,7 @@ serde_json = "1.0.154"
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Direct2D",
@@ -26,6 +27,7 @@ windows = { version = "0.62.2", features = [
     "Win32_System_SystemInformation",
     "Win32_Storage_FileSystem",
 ] }
+windows-numerics = "0.3.1"
 
 [profile.release]
 opt-level = "z"

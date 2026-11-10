@@ -34,12 +34,20 @@ pub struct Cache {
     /// after an install without re-downloading the whole store catalog.
     #[serde(default)]
     pub catalog: Vec<App>,
+    /// Display copies of the ignored rows. `ignored` stays the source of
+    /// truth; this only lets the "ignored updates" page show names offline.
+    /// `default` keeps caches written by 0.6.0 and earlier readable.
+    #[serde(default)]
+    pub ignored_items: Vec<UpdateItem>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CheckResult {
     pub catalog: Vec<App>,
     pub items: Vec<UpdateItem>,
+    /// Same local snapshot used for the comparison, so the store page can
+    /// refresh its "installed" badges without a second registry walk.
+    pub local: Vec<Installed>,
 }
 
 pub fn now() -> u64 {
@@ -125,6 +133,7 @@ pub fn check(token: &str, progress: &mut dyn FnMut(usize, usize)) -> Result<Chec
     Ok(CheckResult {
         items: match_updates(&catalog, &local),
         catalog,
+        local,
     })
 }
 
@@ -137,10 +146,6 @@ pub fn rescan_with(catalog: &[App], local: &[Installed], ignored: &[String]) -> 
         .into_iter()
         .filter(|i| !ignored.contains(&i.soft_id))
         .collect()
-}
-
-pub fn rescan(catalog: &[App], ignored: &[String]) -> Vec<UpdateItem> {
-    rescan_with(catalog, &installed::scan(), ignored)
 }
 
 /// Pure function so the matching rules can be exercised without network or
@@ -187,6 +192,33 @@ pub fn match_updates(catalog: &[App], local: &[Installed]) -> Vec<UpdateItem> {
     out
 }
 
+/// Restore one ignored update. Pure so the "restore" path is unit-testable
+/// without a window; the caller re-scans afterwards to bring the row back.
+pub fn unignore(
+    ignored: &mut Vec<String>,
+    items: &mut Vec<UpdateItem>,
+    index: usize,
+) -> Option<UpdateItem> {
+    if index >= ignored.len() {
+        return None;
+    }
+    let id = ignored.remove(index);
+    let entry = items
+        .iter()
+        .position(|x| x.soft_id == id)
+        .map(|p| items.remove(p))
+        .unwrap_or(UpdateItem {
+            soft_id: id.clone(),
+            name: format!("应用 {}", id),
+            current: String::new(),
+            latest: String::new(),
+            size: None,
+            logo: None,
+            url: String::new(),
+        });
+    Some(entry)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +237,7 @@ mod tests {
         Installed {
             name: name.into(),
             version: ver.into(),
+            ..Default::default()
         }
     }
 
@@ -257,6 +290,51 @@ mod tests {
 
         let ignored = vec!["2".to_string()];
         assert!(rescan_with(&catalog, &after, &ignored).is_empty());
+    }
+
+    #[test]
+    fn unignore_removes_the_id_and_its_display_row() {
+        let mut ignored = vec!["1".to_string(), "2".to_string()];
+        let mut items = vec![
+            UpdateItem {
+                soft_id: "1".into(),
+                name: "微信".into(),
+                current: "3.9.8".into(),
+                latest: "3.9.10".into(),
+                size: None,
+                logo: None,
+                url: String::new(),
+            },
+            UpdateItem {
+                soft_id: "2".into(),
+                name: "QQ".into(),
+                current: "9.9.30".into(),
+                latest: "9.9.37".into(),
+                size: None,
+                logo: None,
+                url: String::new(),
+            },
+        ];
+        let restored = unignore(&mut ignored, &mut items, 1).unwrap();
+        assert_eq!(restored.name, "QQ");
+        assert_eq!(ignored, vec!["1".to_string()]);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].soft_id, "1");
+        assert!(unignore(&mut ignored, &mut items, 9).is_none());
+        // A legacy cache may have an id without a display row.
+        let legacy = unignore(&mut ignored, &mut items, 0).unwrap();
+        assert_eq!(legacy.soft_id, "1");
+        assert!(ignored.is_empty());
+    }
+
+    #[test]
+    fn old_cache_without_ignored_items_still_loads() {
+        let json = r#"{"checked_at":123,"items":[],"ignored":["7"],"catalog":[]}"#;
+        let c: Cache = serde_json::from_str(json).unwrap();
+        assert_eq!(c.checked_at, 123);
+        assert_eq!(c.ignored, vec!["7".to_string()]);
+        assert!(c.ignored_items.is_empty());
+        assert!(c.catalog.is_empty());
     }
 
     /// Diagnostic for the real update check. Run with `cargo test -- --ignored`.

@@ -6,19 +6,21 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 
 use crate::app::{
-    AppState, BTN_H, GAP, HIT_ALL, HIT_CHECK, HIT_ROW, HIT_ROW_IGNORE, HIT_ROW_UPDATE, Mode, NAV_W,
-    PAD, Payload, ROW_H, STATUS_H, TOP_H, WM_APP_DL_DONE, WM_APP_DL_PROGRESS, WM_APP_STATUS,
-    WM_APP_UPDATE_DONE, WM_APP_UPDATE_PROGRESS, draw_button, in_rect, post,
+    AppState, BTN_H, GAP, HIT_ALL, HIT_CHECK, HIT_IGNORED_ALL, HIT_IGNORED_LIST,
+    HIT_IGNORED_RESTORE, HIT_ROW, HIT_ROW_IGNORE, HIT_ROW_UPDATE, Mode, NAV_W, PAD, Payload, ROW_H,
+    STATUS_H, TOP_H, WM_APP_DL_DONE, WM_APP_DL_PROGRESS, WM_APP_STATUS, WM_APP_UPDATE_DONE,
+    WM_APP_UPDATE_PROGRESS, draw_button, in_rect, post,
 };
 use crate::downloads::Progress;
 use crate::gfx;
+use crate::installed::{self, Installed, Inventory};
 use crate::net;
-use crate::update;
+use crate::update::{self, UpdateItem};
 
 fn sanitize(name: &str) -> String {
     let out: String = name
@@ -260,6 +262,10 @@ fn finalize(
 
 impl AppState {
     pub(crate) fn show_updates(&mut self) {
+        // Entering the page from the sidebar always shows the actionable list;
+        // the ignored list is only one click away from its button.
+        self.ignored_view = false;
+        self.scroll = 0;
         // Without a cached catalog there is nothing to re-match locally.
         if self.update_catalog.is_empty() || self.update_checked_at == 0 {
             self.start_update_check();
@@ -275,26 +281,36 @@ impl AppState {
         }
         let hours = update::now().saturating_sub(self.update_checked_at) / 3600;
         self.status = format!(
-            "软件更新  ·  {} 个可更新  ·  已重新扫描本机  ·  目录检查于 {} 小时前",
+            "软件更新  ·  {} 个可更新  ·  本机 {} 款已装  ·  目录 {} 小时前",
             self.updates.len(),
+            self.inventory.apps().len(),
             hours
         );
         self.invalidate();
     }
 
     /// Fast local-only refresh: no catalog request, no data leaves the machine.
-    /// Returns true when the visible list actually changed.
+    /// The single registry walk also refreshes the store's "installed" badges.
+    /// Returns true when the visible update list actually changed.
     pub(crate) fn refresh_updates_local(&mut self) -> bool {
+        self.set_local_snapshot(installed::scan())
+    }
+
+    fn set_local_snapshot(&mut self, snap: Vec<Installed>) -> bool {
+        self.inventory = Inventory::new(snap);
+        self.last_local_scan = Instant::now();
         if self.update_catalog.is_empty() {
             return false;
         }
-        let items = update::rescan(&self.update_catalog, &self.ignored);
+        let items = update::rescan_with(&self.update_catalog, self.inventory.apps(), &self.ignored);
         let changed = items.len() != self.updates.len()
             || items.iter().zip(self.updates.iter()).any(|(a, b)| {
                 a.soft_id != b.soft_id || a.current != b.current || a.latest != b.latest
             });
         self.updates = items;
-        self.save_update_cache();
+        if changed {
+            self.save_update_cache();
+        }
         changed
     }
 
@@ -342,6 +358,8 @@ impl AppState {
             Ok(r) => {
                 self.update_catalog = r.catalog;
                 self.updates = r.items;
+                self.inventory = Inventory::new(r.local);
+                self.last_local_scan = Instant::now();
                 self.update_checked_at = update::now();
                 self.save_update_cache();
                 self.queue_icons();
@@ -357,18 +375,110 @@ impl AppState {
             checked_at: self.update_checked_at,
             items: self.updates.clone(),
             ignored: self.ignored.clone(),
+            ignored_items: self.ignored_items.clone(),
             catalog: self.update_catalog.clone(),
         });
     }
 
+    /// The third header button. Always visible (even at zero ignored apps) so
+    /// the place to restore an ignored update is discoverable.
+    pub(crate) fn ignored_rect(&self) -> D2D_RECT_F {
+        Self::ignored_button_rect(self.width as f32)
+    }
+
+    pub(crate) fn ignored_button_rect(w: f32) -> D2D_RECT_F {
+        gfx::rect(w - 400.0, TOP_H + 16.0, w - 290.0, TOP_H + 16.0 + BTN_H)
+    }
+
     pub(crate) fn check_rect(&self) -> D2D_RECT_F {
-        let w = self.width as f32;
-        gfx::rect(w - 274.0, TOP_H + 16.0, w - 160.0, TOP_H + 16.0 + BTN_H)
+        Self::check_button_rect(self.width as f32)
+    }
+
+    pub(crate) fn check_button_rect(w: f32) -> D2D_RECT_F {
+        gfx::rect(w - 280.0, TOP_H + 16.0, w - 166.0, TOP_H + 16.0 + BTN_H)
     }
 
     pub(crate) fn all_rect(&self) -> D2D_RECT_F {
-        let w = self.width as f32;
-        gfx::rect(w - 150.0, TOP_H + 16.0, w - PAD, TOP_H + 16.0 + BTN_H)
+        Self::all_button_rect(self.width as f32)
+    }
+
+    pub(crate) fn all_button_rect(w: f32) -> D2D_RECT_F {
+        gfx::rect(w - 156.0, TOP_H + 16.0, w - PAD, TOP_H + 16.0 + BTN_H)
+    }
+
+    /// Rows for the ignored list. Older caches only stored ids: names are
+    /// recovered from the cached catalog, with an id fallback so nothing is
+    /// ever invisible or un-restorable.
+    pub(crate) fn ignored_entries(&self) -> Vec<UpdateItem> {
+        self.ignored
+            .iter()
+            .map(|id| {
+                if let Some(x) = self.ignored_items.iter().find(|x| &x.soft_id == id) {
+                    return x.clone();
+                }
+                if let Some(a) = self.update_catalog.iter().find(|a| &a.id == id) {
+                    return UpdateItem {
+                        soft_id: a.id.clone(),
+                        name: a.name.clone(),
+                        current: String::new(),
+                        latest: a.version.clone().unwrap_or_default(),
+                        size: a.size.clone(),
+                        logo: a.logo_url().map(str::to_string),
+                        url: a.download_url(),
+                    };
+                }
+                UpdateItem {
+                    soft_id: id.clone(),
+                    name: format!("应用 {}", id),
+                    current: String::new(),
+                    latest: String::new(),
+                    size: None,
+                    logo: None,
+                    url: String::new(),
+                }
+            })
+            .collect()
+    }
+
+    fn restore_ignored(&mut self, i: usize) {
+        let Some(entry) = update::unignore(&mut self.ignored, &mut self.ignored_items, i) else {
+            return;
+        };
+        // Local-only re-scan: if a newer version is still available the row
+        // comes back into the update list immediately.
+        self.refresh_updates_local();
+        self.save_update_cache();
+        self.status = format!("已恢复 {} 的更新提醒", entry.name);
+        self.invalidate();
+    }
+
+    fn restore_all(&mut self) {
+        let n = self.ignored.len();
+        if n == 0 {
+            return;
+        }
+        self.ignored.clear();
+        self.ignored_items.clear();
+        self.ignored_view = false;
+        self.scroll = 0;
+        self.refresh_updates_local();
+        self.save_update_cache();
+        self.status = format!("已恢复全部 {} 项更新提醒", n);
+        self.invalidate();
+    }
+
+    fn toggle_ignored_view(&mut self) {
+        self.ignored_view = !self.ignored_view;
+        self.scroll = 0;
+        self.status = if self.ignored_view {
+            format!(
+                "已忽略 {} 项  ·  点「恢复」重新接收更新提醒",
+                self.ignored.len()
+            )
+        } else {
+            format!("软件更新  ·  {} 个可更新", self.updates.len())
+        };
+        self.invalidate();
     }
 
     pub(crate) fn row_rect(&self, i: usize) -> Option<D2D_RECT_F> {
@@ -405,40 +515,79 @@ impl AppState {
 
     pub(crate) fn update_max_scroll(&self) -> i32 {
         let visible = (self.height as f32 - TOP_H - STATUS_H - 100.0).max(0.0);
-        let content = self.updates.len() as f32 * (ROW_H + GAP);
+        let rows = if self.ignored_view {
+            self.ignored.len()
+        } else {
+            self.updates.len()
+        };
+        let content = rows as f32 * (ROW_H + GAP);
         (content - visible).max(0.0) as i32
     }
 
     pub(crate) fn render_updates(&mut self, w: f32, _h: f32) {
         let p = self.gfx.pal;
+        let viewing_ignored = self.ignored_view;
+        let rows: Vec<UpdateItem> = if viewing_ignored {
+            self.ignored_entries()
+        } else {
+            self.updates.clone()
+        };
         self.gfx.text(
-            "软件更新",
-            gfx::rect(NAV_W + PAD, TOP_H + 12.0, w - 300.0, TOP_H + 44.0),
+            if viewing_ignored {
+                "已忽略的更新"
+            } else {
+                "软件更新"
+            },
+            gfx::rect(NAV_W + PAD, TOP_H + 12.0, w - 420.0, TOP_H + 44.0),
             19,
             true,
             p.text,
         );
-        let sub = if self.update_checking {
-            format!(
-                "正在检查… {}/{}（本地比对，不上传本机软件清单）",
-                self.update_progress.0, self.update_progress.1
-            )
+        // Three header buttons leave a narrow caption band on an 830 DIP
+        // window; use short wording there instead of ellipsis clipping.
+        let narrow = w < 1000.0;
+        let sub = if viewing_ignored {
+            if narrow {
+                format!("{} 项已忽略  ·  点「恢复」重新提醒", rows.len())
+            } else {
+                format!("{} 项已忽略  ·  恢复后将重新出现在更新列表", rows.len())
+            }
+        } else if self.update_checking {
+            if narrow {
+                format!(
+                    "正在检查… {}/{}",
+                    self.update_progress.0, self.update_progress.1
+                )
+            } else {
+                format!(
+                    "正在检查… {}/{}（本地比对，不上传本机软件清单）",
+                    self.update_progress.0, self.update_progress.1
+                )
+            }
         } else if self.update_checked_at == 0 {
-            "尚未检查  ·  点击「检查更新」扫描本机已安装软件".to_string()
+            if narrow {
+                "点击「检查更新」扫描本机".to_string()
+            } else {
+                "尚未检查  ·  点击「检查更新」扫描本机已安装软件".to_string()
+            }
         } else {
             let hours = update::now().saturating_sub(self.update_checked_at) / 3600;
-            format!(
-                "{} 个可更新  ·  上次检查 {} 小时前  ·  仅本地比对",
-                self.updates.len(),
-                hours
-            )
+            if narrow {
+                format!("{} 个可更新  ·  {} 小时前检查", self.updates.len(), hours)
+            } else {
+                format!(
+                    "{} 个可更新  ·  上次检查 {} 小时前  ·  仅本地比对",
+                    self.updates.len(),
+                    hours
+                )
+            }
         };
         self.gfx.text(
             &sub,
             gfx::rect(
                 NAV_W + PAD,
                 TOP_H + 44.0,
-                (w - 300.0).max(NAV_W + PAD + 120.0),
+                (w - 420.0).max(NAV_W + PAD + 120.0),
                 TOP_H + 68.0,
             ),
             11,
@@ -446,6 +595,21 @@ impl AppState {
             p.sub,
         );
 
+        let ignored_label = if viewing_ignored {
+            "返回更新".to_string()
+        } else {
+            format!("已忽略 {}", self.ignored.len())
+        };
+        let gr = self.ignored_rect();
+        draw_button(
+            &mut self.gfx,
+            p,
+            gr,
+            &ignored_label,
+            false,
+            self.hover == Some((HIT_IGNORED_LIST, 0)),
+            false,
+        );
         let cr = self.check_rect();
         draw_button(
             &mut self.gfx,
@@ -465,18 +629,38 @@ impl AppState {
             &mut self.gfx,
             p,
             ar,
-            "全部更新",
+            if viewing_ignored {
+                "全部恢复"
+            } else {
+                "全部更新"
+            },
             false,
-            self.hover == Some((HIT_ALL, 0)),
-            self.updates.is_empty() || self.update_checking,
+            self.hover
+                == Some((
+                    if viewing_ignored {
+                        HIT_IGNORED_ALL
+                    } else {
+                        HIT_ALL
+                    },
+                    0,
+                )),
+            if viewing_ignored {
+                self.ignored.is_empty()
+            } else {
+                self.updates.is_empty() || self.update_checking
+            },
         );
 
-        if self.updates.is_empty() && !self.update_checking {
+        if rows.is_empty() && (!self.update_checking || viewing_ignored) {
             let card = gfx::rect(NAV_W + PAD, TOP_H + 108.0, w - PAD, TOP_H + 224.0);
             self.gfx.round(card, 16.0, p.accent_soft);
             self.gfx.outline(card, p.border, 0.8);
             self.gfx.text(
-                "未发现可更新应用",
+                if viewing_ignored {
+                    "没有被忽略的应用"
+                } else {
+                    "未发现可更新应用"
+                },
                 gfx::rect(
                     card.left + 28.0,
                     card.top + 24.0,
@@ -488,7 +672,11 @@ impl AppState {
                 p.text,
             );
             self.gfx.text(
-                "检查更新会比对商店目录与本机已安装软件，全程在本地完成",
+                if viewing_ignored {
+                    "点「忽略」跳过的软件会列在这里，随时可以恢复更新提醒"
+                } else {
+                    "检查更新会比对商店目录与本机已安装软件，全程在本地完成"
+                },
                 gfx::rect(
                     card.left + 28.0,
                     card.top + 64.0,
@@ -502,12 +690,15 @@ impl AppState {
             return;
         }
 
-        for (i, u) in self.updates.iter().enumerate() {
+        for (i, u) in rows.iter().enumerate() {
             let Some(r) = self.row_rect(i) else {
                 continue;
             };
             let row_hover = self.hover.is_some_and(|(k, n)| {
-                n == i && matches!(k, HIT_ROW | HIT_ROW_UPDATE | HIT_ROW_IGNORE)
+                n == i
+                    && ((viewing_ignored && k == HIT_IGNORED_RESTORE)
+                        || (!viewing_ignored
+                            && matches!(k, HIT_ROW | HIT_ROW_UPDATE | HIT_ROW_IGNORE)))
             });
             self.gfx
                 .round(r, 12.0, if row_hover { p.hover } else { p.card });
@@ -521,7 +712,11 @@ impl AppState {
                 self.gfx.center_text(&ch, icon, 22, true, p.accent);
             }
             let (upd, ign) = Self::row_buttons(r);
-            let text_right = ign.left - 12.0;
+            let text_right = if viewing_ignored {
+                upd.left - 12.0
+            } else {
+                ign.left - 12.0
+            };
             self.gfx.text(
                 &u.name,
                 gfx::rect(r.left + 84.0, r.top + 12.0, text_right, r.top + 40.0),
@@ -529,31 +724,52 @@ impl AppState {
                 true,
                 p.text,
             );
+            let version_line = if viewing_ignored {
+                if u.latest.is_empty() {
+                    "已忽略更新提示  ·  点「恢复」重新接收提醒".to_string()
+                } else {
+                    format!("商店版本 {}  ·  已忽略更新提示", u.latest)
+                }
+            } else {
+                format!("当前 {}   →   新版 {}", u.current, u.latest)
+            };
             self.gfx.text(
-                &format!("当前 {}   →   新版 {}", u.current, u.latest),
+                &version_line,
                 gfx::rect(r.left + 84.0, r.top + 42.0, text_right, r.top + 68.0),
                 12,
                 false,
                 p.sub,
             );
-            draw_button(
-                &mut self.gfx,
-                p,
-                ign,
-                "忽略",
-                false,
-                self.hover == Some((HIT_ROW_IGNORE, i)),
-                false,
-            );
-            draw_button(
-                &mut self.gfx,
-                p,
-                upd,
-                "更新",
-                true,
-                self.hover == Some((HIT_ROW_UPDATE, i)),
-                false,
-            );
+            if viewing_ignored {
+                draw_button(
+                    &mut self.gfx,
+                    p,
+                    upd,
+                    "恢复",
+                    true,
+                    self.hover == Some((HIT_IGNORED_RESTORE, i)),
+                    false,
+                );
+            } else {
+                draw_button(
+                    &mut self.gfx,
+                    p,
+                    ign,
+                    "忽略",
+                    false,
+                    self.hover == Some((HIT_ROW_IGNORE, i)),
+                    false,
+                );
+                draw_button(
+                    &mut self.gfx,
+                    p,
+                    upd,
+                    "更新",
+                    true,
+                    self.hover == Some((HIT_ROW_UPDATE, i)),
+                    false,
+                );
+            }
         }
     }
 
@@ -652,23 +868,50 @@ impl AppState {
         if !self.ignored.contains(&u.soft_id) {
             self.ignored.push(u.soft_id.clone());
         }
+        self.ignored_items.retain(|x| x.soft_id != u.soft_id);
+        self.ignored_items.push(u.clone());
         self.save_update_cache();
-        self.status = format!("已忽略 {} 的更新提示", u.name);
+        self.status = format!(
+            "已忽略 {} 的更新提示  ·  可在「已忽略 {}」中恢复",
+            u.name,
+            self.ignored.len()
+        );
         self.invalidate();
     }
 }
 
 /// Hit targets for the updates page, consumed by the shared hit-test in app.rs.
 pub(crate) fn hit_targets(st: &AppState, x: f32, y: f32) -> Option<(u8, usize)> {
+    if in_rect(x, y, st.ignored_rect()) {
+        return Some((HIT_IGNORED_LIST, 0));
+    }
     if in_rect(x, y, st.check_rect()) {
         return Some((HIT_CHECK, 0));
     }
     if in_rect(x, y, st.all_rect()) {
-        return Some((HIT_ALL, 0));
+        return Some((
+            if st.ignored_view {
+                HIT_IGNORED_ALL
+            } else {
+                HIT_ALL
+            },
+            0,
+        ));
     }
-    for i in 0..st.updates.len() {
+    let rows = if st.ignored_view {
+        st.ignored.len()
+    } else {
+        st.updates.len()
+    };
+    for i in 0..rows {
         if let Some(r) = st.row_rect(i) {
             let (upd, ign) = AppState::row_buttons(r);
+            if st.ignored_view {
+                if in_rect(x, y, upd) || in_rect(x, y, r) {
+                    return Some((HIT_IGNORED_RESTORE, i));
+                }
+                continue;
+            }
             if in_rect(x, y, upd) {
                 return Some((HIT_ROW_UPDATE, i));
             }
@@ -687,6 +930,9 @@ pub(crate) fn apply(st: &mut AppState, kind: u8, i: usize) {
     match kind {
         HIT_CHECK => st.start_update_check(),
         HIT_ALL => st.update_all(),
+        HIT_IGNORED_LIST => st.toggle_ignored_view(),
+        HIT_IGNORED_ALL => st.restore_all(),
+        HIT_IGNORED_RESTORE => st.restore_ignored(i),
         HIT_ROW_UPDATE => st.start_update_download(i),
         HIT_ROW_IGNORE => st.ignore_update(i),
         HIT_ROW => {

@@ -3,14 +3,19 @@
 //! store catalog happens locally (see `update.rs`).
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use windows::Win32::System::Registry::*;
 use windows::core::HSTRING;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Installed {
     pub name: String,
     pub version: String,
+    /// `DisplayIcon` — usually the main executable, sometimes with `,0`.
+    pub icon: Option<String>,
+    /// `InstallLocation` — used as a fallback when the icon is not an exe.
+    pub location: Option<String>,
 }
 
 const HKLM_PATHS: [&str; 2] = [
@@ -128,26 +133,31 @@ fn scan_root(root: HKEY, path: &str, out: &mut Vec<Installed>) {
                 continue;
             }
             let name = read_string(item, "DisplayName");
-            let version = read_string(item, "DisplayVersion");
+            // A missing DisplayVersion is common for Chinese desktop apps.
+            // Keep those entries for the "installed" badge; version comparison
+            // simply declines to flag them as outdated.
+            let version = read_string(item, "DisplayVersion").unwrap_or_default();
+            let icon = read_string(item, "DisplayIcon");
+            let location = read_string(item, "InstallLocation");
             let publisher = read_string(item, "Publisher").unwrap_or_default();
             let system = read_dword(item, "SystemComponent");
             let parent = read_string(item, "ParentKeyName");
             let release = read_string(item, "ReleaseType");
             let _ = RegCloseKey(item);
 
-            let (Some(name), Some(version)) = (name, version) else {
-                continue;
-            };
+            let Some(name) = name else { continue };
             if system != 0 || parent.is_some() || release.is_some() {
                 continue;
             }
-            if is_system_patch(&name) || segments(&version).is_empty() {
+            if is_system_patch(&name) || is_runtime(&name, &publisher) {
                 continue;
             }
-            if is_runtime(&name, &publisher) {
-                continue;
-            }
-            out.push(Installed { name, version });
+            out.push(Installed {
+                name,
+                version,
+                icon,
+                location,
+            });
         }
         let _ = RegCloseKey(h);
     }
@@ -163,14 +173,21 @@ pub fn scan() -> Vec<Installed> {
     scan_root(HKEY_CURRENT_USER, HKCU_PATH, &mut raw);
 
     let mut map: HashMap<String, Installed> = HashMap::new();
+    // HKLM, WOW6432Node and HKCU may all describe the same product. Keep the
+    // richest entry: a real version string plus a usable launch path wins.
+    let score = |x: &Installed| {
+        (
+            segments(&x.version).len(),
+            u8::from(x.icon.is_some()),
+            u8::from(x.location.is_some()),
+        )
+    };
     for i in raw {
         let k = normalize(&i.name);
         if k.is_empty() {
             continue;
         }
-        if let Some(prev) = map.get(&k)
-            && !is_newer(&i.version, &prev.version)
-        {
+        if map.get(&k).is_some_and(|prev| score(prev) >= score(&i)) {
             continue;
         }
         map.insert(k, i);
@@ -222,19 +239,20 @@ pub fn normalize(s: &str) -> String {
 /// Conservative name match: exact after normalization, or a contained name
 /// that is long enough to avoid short-name false positives.
 pub fn name_matches(shop: &str, local: &str) -> bool {
-    let a = normalize(shop);
-    let b = normalize(local);
+    matches_normalized(&normalize(shop), &normalize(local))
+}
+
+/// Same rule, but for names that were normalized once up front. The store
+/// re-evaluates every visible card on each paint, so the inventory keeps a
+/// normalized copy instead of allocating two strings per comparison.
+pub fn matches_normalized(a: &str, b: &str) -> bool {
     if a.is_empty() || b.is_empty() {
         return false;
     }
     if a == b {
         return true;
     }
-    let (short, long) = if a.len() <= b.len() {
-        (a.as_str(), b.as_str())
-    } else {
-        (b.as_str(), a.as_str())
-    };
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     long.contains(short) && short.chars().count() >= 3 && short.len() * 2 >= long.len()
 }
 
@@ -270,6 +288,170 @@ fn segments_with_suffix(v: &str) -> (Vec<u64>, bool) {
 
 pub fn segments(v: &str) -> Vec<u64> {
     segments_with_suffix(v).0
+}
+
+/// What the store needs to know about one catalog app on this machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledApp {
+    /// Empty when the uninstall key has no `DisplayVersion`.
+    pub version: String,
+    pub outdated: bool,
+    /// Verified path to a real `.exe`, never an arbitrary command line.
+    pub launch: Option<PathBuf>,
+}
+
+/// A snapshot of the local inventory with normalized names and resolved
+/// launch paths, so painting a page of cards does no registry or disk I/O.
+#[derive(Debug, Clone, Default)]
+pub struct Inventory {
+    apps: Vec<Installed>,
+    norm: Vec<String>,
+    launch: Vec<Option<PathBuf>>,
+}
+
+impl Inventory {
+    pub fn new(apps: Vec<Installed>) -> Self {
+        let norm = apps.iter().map(|a| normalize(&a.name)).collect();
+        let launch = apps.iter().map(launch_path).collect();
+        Self { apps, norm, launch }
+    }
+
+    pub fn apps(&self) -> &[Installed] {
+        &self.apps
+    }
+
+    /// Match one store app against the snapshot. `shop_version` is only used
+    /// for the "a newer version exists" hint; an unknown local version never
+    /// produces a false update badge.
+    pub fn status(&self, shop_name: &str, shop_version: Option<&str>) -> Option<InstalledApp> {
+        let a = normalize(shop_name);
+        if a.is_empty() {
+            return None;
+        }
+        let mut best: Option<usize> = None;
+        for (idx, n) in self.norm.iter().enumerate() {
+            if !matches_normalized(&a, n) {
+                continue;
+            }
+            let cand = &self.apps[idx];
+            let better = best.is_none_or(|b| {
+                let prev = &self.apps[b];
+                is_newer(&cand.version, &prev.version)
+                    || (cand.version == prev.version
+                        && self.launch[idx].is_some()
+                        && self.launch[b].is_none())
+            });
+            if better {
+                best = Some(idx);
+            }
+        }
+        let i = best?;
+        let version = self.apps[i].version.trim().to_string();
+        let outdated = shop_version
+            .is_some_and(|v| !v.trim().is_empty() && !version.is_empty() && is_newer(v, &version));
+        Some(InstalledApp {
+            version,
+            outdated,
+            launch: self.launch[i].clone(),
+        })
+    }
+}
+
+/// Expand `%NAME%` tokens (registry values of type REG_EXPAND_SZ are not
+/// expanded by RegQueryValueExW).
+fn expand_env(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('%') else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let key = &after[..end];
+        match std::env::var(key) {
+            Ok(v) => out.push_str(&v),
+            Err(_) => {
+                out.push('%');
+                out.push_str(key);
+                out.push('%');
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Turn a `DisplayIcon` string into a verified executable path. Handles
+/// quotes, `,0` icon indices, trailing arguments and environment variables.
+fn display_exe(raw: &str) -> Option<PathBuf> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let inner = if let Some(rest) = s.strip_prefix('"') {
+        rest.split('"').next().unwrap_or("").trim()
+    } else {
+        // "C:\app.exe,0" / "C:\app.exe -silent"
+        let cut = s
+            .rfind(',')
+            .filter(|&i| s[i + 1..].chars().all(|c| c.is_ascii_digit() || c == '-'))
+            .unwrap_or(s.len());
+        let s = s[..cut].trim();
+        let end = s.to_ascii_lowercase().find(".exe")? + 4;
+        s[..end].trim()
+    };
+    let p = PathBuf::from(expand_env(inner));
+    if p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+        && p.is_file()
+    {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+/// `InstallLocation` is only trusted when it contains exactly one plausible
+/// main executable — otherwise we might launch an uninstaller or a helper.
+fn folder_exe(raw: &str) -> Option<PathBuf> {
+    let dir = PathBuf::from(expand_env(raw.trim().trim_matches('"')));
+    let entries = std::fs::read_dir(&dir).ok()?;
+    let mut found: Option<PathBuf> = None;
+    for e in entries.flatten() {
+        let p = e.path();
+        if !p.is_file()
+            || !p
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| x.eq_ignore_ascii_case("exe"))
+        {
+            continue;
+        }
+        let stem = p
+            .file_stem()
+            .and_then(|x| x.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if stem.contains("uninst") || stem.contains("setup") || stem.contains("卸载") {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(p);
+    }
+    found
+}
+
+pub fn launch_path(i: &Installed) -> Option<PathBuf> {
+    if let Some(p) = i.icon.as_deref().and_then(display_exe) {
+        return Some(p);
+    }
+    i.location.as_deref().and_then(folder_exe)
 }
 
 pub fn is_newer(latest: &str, current: &str) -> bool {
@@ -338,9 +520,56 @@ mod tests {
             println!("  {} | {}", a.name, a.version);
         }
         assert!(!apps.is_empty(), "registry scan returned nothing");
+        assert!(apps.iter().all(|a| !a.name.is_empty()));
         assert!(
-            apps.iter()
-                .all(|a| !a.name.is_empty() && !segments(&a.version).is_empty())
+            apps.iter().any(|a| !segments(&a.version).is_empty()),
+            "at least one entry should carry a version"
         );
+    }
+
+    #[test]
+    fn display_icon_resolves_to_a_real_executable() {
+        let comspec = std::env::var("COMSPEC").unwrap_or_default();
+        if comspec.is_empty() {
+            return;
+        }
+        let quoted = format!("\"{}\",0", comspec);
+        let app = Installed {
+            name: "Test".into(),
+            icon: Some(quoted),
+            ..Default::default()
+        };
+        assert_eq!(launch_path(&app), Some(PathBuf::from(comspec)));
+        let bogus = Installed {
+            name: "Test".into(),
+            icon: Some("C:\\definitely\\missing\\app.exe,1".into()),
+            ..Default::default()
+        };
+        assert_eq!(launch_path(&bogus), None);
+    }
+
+    #[test]
+    fn inventory_reports_installed_outdated_and_missing() {
+        let inv = Inventory::new(vec![
+            Installed {
+                name: "微信 Windows 版".into(),
+                version: "3.9.8".into(),
+                ..Default::default()
+            },
+            Installed {
+                name: "Google Chrome".into(),
+                version: String::new(),
+                ..Default::default()
+            },
+        ]);
+        let wechat = inv.status("微信", Some("3.9.10")).unwrap();
+        assert_eq!(wechat.version, "3.9.8");
+        assert!(wechat.outdated);
+        assert!(!inv.status("微信", Some("3.9.8")).unwrap().outdated);
+        // No local version: installed, but never falsely marked outdated.
+        let chrome = inv.status("Chrome", Some("120.0")).unwrap();
+        assert!(chrome.version.is_empty());
+        assert!(!chrome.outdated);
+        assert!(inv.status("支付宝", Some("1.0")).is_none());
     }
 }

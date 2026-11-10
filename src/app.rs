@@ -4,7 +4,9 @@
 //! rendering and the click targets can never drift apart.
 use std::collections::{HashSet, VecDeque};
 use std::ffi::c_void;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
@@ -14,6 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::downloads::{self, DlState, DlTask};
 use crate::gfx::{self, Gfx, Palette};
+use crate::installed::{InstalledApp, Inventory};
 use crate::model::{App, ClassGroup, Detail, html_to_text};
 use crate::net;
 use crate::update::{self, UpdateItem};
@@ -75,6 +78,10 @@ pub const HIT_DL_OPEN: u8 = 14;
 pub const HIT_DL_REMOVE: u8 = 15;
 pub const HIT_DL_CLEAR: u8 = 16;
 pub const HIT_DL_NAV: u8 = 17;
+pub const HIT_IGNORED_LIST: u8 = 18;
+pub const HIT_IGNORED_RESTORE: u8 = 19;
+pub const HIT_IGNORED_ALL: u8 = 20;
+pub const HIT_REINSTALL: u8 = 21;
 
 pub enum Payload {
     Data(Result<(String, Vec<ClassGroup>, Vec<App>), String>),
@@ -173,6 +180,14 @@ pub struct AppState {
     pub update_progress: (usize, usize),
     pub update_checked_at: u64,
     pub ignored: Vec<String>,
+    /// Display rows for ignored updates, so the restore page has names even
+    /// when the catalog has not been fetched in this session.
+    pub ignored_items: Vec<UpdateItem>,
+    /// true = the updates page currently shows the ignored list.
+    pub ignored_view: bool,
+    /// Local registry snapshot (no I/O on paint; rebuilt on refresh).
+    pub inventory: Inventory,
+    pub(crate) last_local_scan: Instant,
     /// Download centre tasks; the single source of truth for every progress UI.
     pub downloads: Vec<DlTask>,
     pub next_dl_id: u64,
@@ -288,6 +303,10 @@ impl AppState {
             update_progress: (0, 0),
             update_checked_at: cache.checked_at,
             ignored: cache.ignored.clone(),
+            ignored_items: cache.ignored_items.clone(),
+            ignored_view: false,
+            inventory: Inventory::default(),
+            last_local_scan: Instant::now(),
             downloads: Vec::new(),
             next_dl_id: 0,
             speed_history: VecDeque::with_capacity(downloads::SPEED_SAMPLES),
@@ -295,11 +314,9 @@ impl AppState {
             detail_epoch: 0,
             pending_icons: HashSet::new(),
         };
-        // The cached badge can be hours old; refresh it against the current
-        // uninstall keys before the first paint (pure local registry read).
-        if !state.update_catalog.is_empty() {
-            state.refresh_updates_local();
-        }
+        // One registry walk at start-up feeds both the update badge and the
+        // "installed" badges on every store card. No I/O happens while painting.
+        state.refresh_updates_local();
         state
     }
 
@@ -662,7 +679,7 @@ impl AppState {
         self.detail_index = idx;
         self.detail_extra = None;
         self.scroll = 0;
-        self.status = "应用详情  ·  点击「获取」下载安装包到 Downloads".into();
+        self.status = "应用详情  ·  已装应用可直接打开，也可重新下载安装包".into();
         self.invalidate();
         let h = self.hwnd_usize();
         let token = self.token.clone();
@@ -676,9 +693,10 @@ impl AppState {
         });
     }
 
-    /// Install button = download task control. One click starts, a second
-    /// cancels, a finished task opens the folder and a failed one retries.
-    fn start_download(&mut self, idx: usize) {
+    /// The primary action is state-aware: an active task cancels, a finished
+    /// one opens the folder, an installed up-to-date app launches, an outdated
+    /// app (or "re-download") fetches a package, everything else downloads.
+    fn start_download(&mut self, idx: usize, force: bool) {
         let Some(app) = self.apps.get(idx).cloned() else {
             return;
         };
@@ -699,6 +717,33 @@ impl AppState {
             }
             return;
         }
+        if !force {
+            let version = if self.mode == Mode::Detail {
+                self.detail_extra.as_ref().and_then(|d| d.version.clone())
+            } else {
+                None
+            }
+            .or_else(|| app.version.clone());
+            if let Some(info) = self.inventory.status(&app.name, version.as_deref())
+                && !info.outdated
+            {
+                if let Some(path) = info.launch {
+                    self.launch_installed(&app.name, &path);
+                } else {
+                    let v = if info.version.is_empty() {
+                        String::new()
+                    } else {
+                        format!("（{}）", info.version)
+                    };
+                    self.status = format!(
+                        "{} 已在本机安装{}  ·  如需安装包，请在详情页点「重新下载」",
+                        app.name, v
+                    );
+                }
+                self.invalidate();
+                return;
+            }
+        }
         let url = self
             .detail_extra
             .as_ref()
@@ -707,6 +752,19 @@ impl AppState {
             .unwrap_or_else(|| app.download_url());
         let id = self.new_download(&app.name, &url, app.logo_url().map(str::to_string));
         self.start_task(id);
+    }
+
+    /// Only a verified `.exe` from the uninstall key reaches this function;
+    /// the path is passed directly to CreateProcess, never through a shell.
+    fn launch_installed(&mut self, name: &str, path: &Path) {
+        let mut cmd = std::process::Command::new(path);
+        if let Some(dir) = path.parent() {
+            cmd.current_dir(dir);
+        }
+        self.status = match cmd.spawn() {
+            Ok(_) => format!("已启动 {}", name),
+            Err(e) => format!("无法启动 {}：{}  ·  可在详情页重新下载安装包", name, e),
+        };
     }
 
     fn cols(&self) -> usize {
@@ -797,12 +855,20 @@ impl AppState {
     }
 
     fn detail_progress_text_rect(w: f32) -> D2D_RECT_F {
+        // Full-width band *below* the primary action, so the installed-status
+        // caption has room even on an 830 DIP window (0.7.0 regression: a
+        // narrow right-hand column truncated "已安装 …" to an ellipsis).
         gfx::rect(
             NAV_W + PAD + 24.0,
-            TOP_H + 160.0,
-            w - PAD - 214.0,
-            TOP_H + 186.0,
+            TOP_H + 174.0,
+            w - PAD - 24.0,
+            TOP_H + 192.0,
         )
+    }
+
+    fn reinstall_rect(w: f32) -> D2D_RECT_F {
+        // Same column as the main action, one band above it.
+        gfx::rect(w - PAD - 190.0, TOP_H + 88.0, w - PAD - 24.0, TOP_H + 118.0)
     }
 
     /// Shortcut in the featured banner.
@@ -870,8 +936,8 @@ impl AppState {
                 .and_then(|x| x.version.clone())
                 .or_else(|| a.and_then(|x| x.version.clone()))
                 .filter(|s| !s.trim().is_empty());
-            if let Some(v) = version {
-                info.push(("版本".into(), v));
+            if let Some(v) = version.as_ref() {
+                info.push(("版本".into(), v.clone()));
             }
             let size = d
                 .and_then(|x| x.size.clone())
@@ -890,6 +956,21 @@ impl AppState {
             let dev = d.map(|x| x.developer_name()).unwrap_or_default();
             if !dev.is_empty() {
                 info.push(("开发者".into(), dev));
+            }
+            let local = a.and_then(|x| self.inventory.status(&x.name, version.as_deref()));
+            match local {
+                Some(st) => {
+                    let mut text = if st.version.is_empty() {
+                        "已安装".to_string()
+                    } else {
+                        format!("已安装  ·  {}", st.version)
+                    };
+                    if st.outdated {
+                        text.push_str("  ·  有新版本");
+                    }
+                    info.push(("本机状态".into(), text));
+                }
+                None => info.push(("本机状态".into(), "未安装".into())),
             }
             (body, wn, info)
         };
@@ -1287,6 +1368,11 @@ impl AppState {
                     .map(|t| (t.state, t.frac(), t.percent()))
             })
             .collect();
+        let local_states: Vec<Option<InstalledApp>> = self
+            .apps
+            .iter()
+            .map(|a| self.inventory.status(&a.name, a.version.as_deref()))
+            .collect();
 
         for (i, a) in self.apps.iter().enumerate() {
             let Some(card) = self.card_rect(i) else {
@@ -1394,6 +1480,24 @@ impl AppState {
                         p.sub
                     },
                 );
+            } else if let Some(info) = local_states.get(i).and_then(|x| x.as_ref()) {
+                let version = if info.version.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", info.version)
+                };
+                let text = if info.outdated {
+                    format!("已安装{}  ·  有新版本", version)
+                } else {
+                    format!("已安装{}  ·  已是最新", version)
+                };
+                self.gfx.text(
+                    &text,
+                    Self::card_status_rect(card),
+                    11,
+                    false,
+                    if info.outdated { p.accent } else { p.sub },
+                );
             } else {
                 self.gfx.text(
                     "官方目录  ·  安全下载",
@@ -1403,18 +1507,27 @@ impl AppState {
                     p.sub,
                 );
             }
+            let local = task
+                .is_none()
+                .then(|| local_states.get(i).and_then(|x| x.as_ref()))
+                .flatten();
             let label = match task.map(|t| t.0) {
                 Some(DlState::Downloading | DlState::Queued) => "取消",
                 Some(DlState::Done) => "打开",
                 Some(DlState::Failed | DlState::Canceled) => "重试",
-                None => "获取",
+                None => match local {
+                    Some(info) if info.outdated => "更新",
+                    Some(info) if info.launch.is_some() => "打开",
+                    Some(_) => "已安装",
+                    None => "获取",
+                },
             };
             draw_button(
                 &mut self.gfx,
                 p,
                 ir,
                 label,
-                true,
+                local.is_none_or(|x| x.outdated),
                 self.hover == Some((HIT_INSTALL, i)),
                 false,
             );
@@ -1464,6 +1577,11 @@ impl AppState {
         let task = self
             .task_for(&a.name)
             .map(|t| (t.state, t.frac(), t.percent()));
+        let shop_version = d
+            .as_ref()
+            .and_then(|x| x.version.clone())
+            .or_else(|| a.version.clone());
+        let local = self.inventory.status(&a.name, shop_version.as_deref());
 
         // Hero card: big icon, identity, metadata and one prominent action.
         let hero = gfx::rect(NAV_W + PAD, DETAIL_HERO_TOP, w - PAD, DETAIL_HERO_BOTTOM);
@@ -1555,6 +1673,24 @@ impl AppState {
                     p.accent
                 },
             );
+        } else if let Some(info) = &local {
+            let v = if info.version.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", info.version)
+            };
+            let text = if info.outdated {
+                format!("本机已安装{}  ·  有新版本，点击右侧下载新版", v)
+            } else {
+                format!("本机已安装{}  ·  已是最新", v)
+            };
+            self.gfx.text(
+                &text,
+                hint,
+                11,
+                false,
+                if info.outdated { p.accent } else { p.sub },
+            );
         } else {
             self.gfx
                 .text("获取后保存到 Downloads", hint, 11, false, p.sub);
@@ -1563,17 +1699,36 @@ impl AppState {
             Some(DlState::Downloading | DlState::Queued) => "取消",
             Some(DlState::Done) => "打开位置",
             Some(DlState::Failed | DlState::Canceled) => "重试",
-            None => "获取",
+            None => match &local {
+                Some(info) if info.outdated => "获取新版",
+                Some(info) if info.launch.is_some() => "打开",
+                Some(_) => "已安装",
+                None => "获取",
+            },
         };
         draw_button(
             &mut self.gfx,
             p,
             Self::download_rect(w),
             label,
-            true,
+            task.is_some() || local.as_ref().is_none_or(|x| x.outdated),
             self.hover == Some((HIT_DOWNLOAD, 0)),
             false,
         );
+        if local.is_some() {
+            // Installed apps keep an explicit way to fetch the package again
+            // (repair, offline installer, another machine) without pretending
+            // the app is not installed.
+            draw_button(
+                &mut self.gfx,
+                p,
+                Self::reinstall_rect(w),
+                "重新下载安装包",
+                false,
+                self.hover == Some((HIT_REINSTALL, 0)),
+                false,
+            );
+        }
         if let Some((state, frac, _pct)) = task {
             downloads::progress_bar(
                 &mut self.gfx,
@@ -1688,6 +1843,15 @@ impl AppState {
                 if in_rect(x, y, Self::download_rect(w)) {
                     return Some((HIT_DOWNLOAD, 0));
                 }
+                if in_rect(x, y, Self::reinstall_rect(w))
+                    && self.apps.get(self.detail_index).is_some_and(|a| {
+                        self.inventory
+                            .status(&a.name, a.version.as_deref())
+                            .is_some()
+                    })
+                {
+                    return Some((HIT_REINSTALL, 0));
+                }
                 None
             }
             Mode::Updates => updates_ui::hit_targets(self, x, y),
@@ -1740,9 +1904,13 @@ impl AppState {
             }
             Some((HIT_DOWNLOAD, 0)) => {
                 let i = self.detail_index;
-                self.start_download(i);
+                self.start_download(i, false);
             }
-            Some((HIT_INSTALL, i)) => self.start_download(i),
+            Some((HIT_REINSTALL, 0)) => {
+                let i = self.detail_index;
+                self.start_download(i, true);
+            }
+            Some((HIT_INSTALL, i)) => self.start_download(i, false),
             Some((HIT_CARD, i)) => self.open_detail(i),
             Some((HIT_DL_NAV, _)) => {
                 if let Some(i) = self.nav.iter().position(|n| n.kind == NavKind::Downloads) {
@@ -1761,7 +1929,10 @@ impl AppState {
             Some((kind, i)) if (HIT_DL_CANCEL..=HIT_DL_CLEAR).contains(&kind) => {
                 downloads::apply(self, kind, i);
             }
-            Some((kind, i)) if (HIT_CHECK..=HIT_ROW).contains(&kind) => {
+            Some((kind, i))
+                if (HIT_CHECK..=HIT_ROW).contains(&kind)
+                    || (HIT_IGNORED_LIST..=HIT_IGNORED_ALL).contains(&kind) =>
+            {
                 updates_ui::apply(self, kind, i);
             }
             _ => self.invalidate(),
@@ -1822,17 +1993,20 @@ impl AppState {
                 None
             }
             WM_ACTIVATEAPP => {
-                // The user may have run an installer in another window.
-                if wparam.0 != 0
-                    && self.mode == Mode::Updates
-                    && !self.update_checking
-                    && self.refresh_updates_local()
-                {
-                    self.status = format!(
-                        "本机版本已更新  ·  现有 {} 个可更新应用",
-                        self.updates.len()
-                    );
-                    self.invalidate();
+                // The user may have installed or removed something in another
+                // window. One throttled local scan refreshes both the update
+                // badge and the "installed" labels on the store pages.
+                if wparam.0 != 0 && self.last_local_scan.elapsed() >= Duration::from_secs(2) {
+                    let changed = self.refresh_updates_local();
+                    if changed && self.mode == Mode::Updates && !self.update_checking {
+                        self.status = format!(
+                            "本机版本已更新  ·  现有 {} 个可更新应用",
+                            self.updates.len()
+                        );
+                    }
+                    if changed {
+                        self.invalidate();
+                    }
                 }
                 None
             }
@@ -2140,7 +2314,8 @@ mod tests {
         let button = AppState::download_rect(w);
         let caption = AppState::detail_progress_text_rect(w);
         let bar = AppState::download_progress_rect(w);
-        assert!(caption.right < button.left, "caption crosses action button");
+        // The caption is a full-width band below the action button now.
+        assert!(!overlaps(caption, button), "caption crosses action button");
         assert!(!overlaps(caption, bar), "caption overlaps progress bar");
         assert!(!overlaps(button, bar), "button overlaps progress bar");
         assert!(bar.bottom < DETAIL_HERO_BOTTOM, "bar leaves the hero card");
@@ -2282,6 +2457,74 @@ mod tests {
             assert!(r.left > title.right);
             let button = AppState::search_button_rect(w);
             assert!(r.right < button.left, "field overlaps search button");
+        }
+    }
+
+    /// 0.7.0: a third header button ("ignored updates") must not collide with
+    /// the title, the check button or the update-all button at any width.
+    #[test]
+    fn update_header_buttons_are_disjoint() {
+        for w in [1000.0f32, 1100.0, 1600.0] {
+            let ignored = AppState::ignored_button_rect(w);
+            let check = AppState::check_button_rect(w);
+            let all = AppState::all_button_rect(w);
+            let title = gfx::rect(NAV_W + PAD, TOP_H + 12.0, w - 420.0, TOP_H + 44.0);
+            assert!(title.right < ignored.left, "w={w}: title crosses ignored");
+            assert!(ignored.right < check.left, "w={w}: ignored crosses check");
+            assert!(check.right < all.left, "w={w}: check crosses all");
+            assert!(all.right <= w - PAD + 0.01);
+            assert!(!overlaps(title, ignored));
+            assert!(!overlaps(ignored, check));
+            assert!(!overlaps(check, all));
+        }
+    }
+
+    #[test]
+    fn ignored_row_restore_button_leaves_text_room() {
+        let r = gfx::rect(
+            NAV_W + PAD,
+            TOP_H + 84.0,
+            1100.0 - PAD,
+            TOP_H + 84.0 + ROW_H,
+        );
+        let (primary, secondary) = AppState::row_buttons(r);
+        assert!(primary.right <= r.right - 10.0);
+        assert!(secondary.right < primary.left);
+        let text = gfx::rect(
+            r.left + 84.0,
+            r.top + 12.0,
+            primary.left - 12.0,
+            r.top + 40.0,
+        );
+        assert!(text.right > text.left + 100.0);
+        assert!(!overlaps(text, primary));
+    }
+
+    /// The "re-download" action for installed apps has its own band: it must
+    /// not paint over the status caption, the primary action or the progress
+    /// bar (the 0.4.0 overlap class of bugs).
+    #[test]
+    fn reinstall_button_owns_its_own_band() {
+        for w in [1000.0f32, 1100.0, 1600.0] {
+            let r = AppState::reinstall_rect(w);
+            let caption = AppState::detail_progress_text_rect(w);
+            let action = AppState::download_rect(w);
+            let bar = AppState::download_progress_rect(w);
+            let meta = gfx::rect(
+                NAV_W + PAD + 140.0,
+                DETAIL_HERO_TOP + 92.0,
+                w - PAD - 214.0,
+                DETAIL_HERO_TOP + 140.0,
+            );
+            assert!(!overlaps(r, action), "w={w}: crosses primary action");
+            assert!(!overlaps(r, caption), "w={w}: crosses caption");
+            assert!(!overlaps(r, meta), "w={w}: crosses metadata text");
+            assert!(!overlaps(r, bar), "w={w}: crosses progress bar");
+            assert!(
+                caption.right > caption.left + 300.0,
+                "w={w}: caption too narrow"
+            );
+            assert!(r.bottom < DETAIL_HERO_BOTTOM);
         }
     }
 

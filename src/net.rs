@@ -228,6 +228,30 @@ pub fn parse_content_range(v: &str) -> Option<(u64, u64)> {
     Some((start, total))
 }
 
+/// WinHTTP reports transport trouble as an HRESULT, which reads as
+/// `0x80072EE7` in a download row. Map the codes a user can actually hit onto
+/// plain Chinese; the wording deliberately contains `无法解析` / `无法连接` /
+/// `超时` because [`crate::downloads::link_retryable`] treats those as "this
+/// link is dead, try another source".
+fn transport_err(e: &windows::core::Error) -> String {
+    friendly_transport_code(e.code().0 as u32)
+}
+
+/// Same wording as [`transport_err`], callable from a saved error string that
+/// only kept the HRESULT.
+pub(crate) fn friendly_transport_code(code: u32) -> String {
+    let what = match code {
+        0x80072EE7 | 0x800C0005 => "无法解析下载服务器域名",
+        0x80072EFD => "无法连接下载服务器",
+        0x80072EE2 => "连接下载服务器超时",
+        0x80072EFE => "下载连接被中断",
+        0x80072F8F | 0x80072F7D => "与下载服务器建立安全连接失败",
+        0x80072EE6 => "下载地址格式无效",
+        _ => "下载网络错误",
+    };
+    format!("{}（0x{:08X}）", what, code)
+}
+
 /// A single HTTP round trip. Redirect bodies are discarded; only a final 2xx
 /// response is streamed into `sink`.
 fn one(
@@ -296,9 +320,9 @@ fn one(
             None => (None, 0),
         };
         WinHttpSendRequest(request, None, ptr, len, len, 0)
-            .map_err(|e| format!("发送请求失败：{}", e))?;
+            .map_err(|e| transport_err(&e))?;
         WinHttpReceiveResponse(request, std::ptr::null_mut())
-            .map_err(|e| format!("接收响应失败：{}", e))?;
+            .map_err(|e| transport_err(&e))?;
 
         let status = query_status(request);
         let content_length = query_header(request, WINHTTP_QUERY_CONTENT_LENGTH)
@@ -349,7 +373,7 @@ fn one(
                 available,
                 &mut read,
             )
-            .map_err(|e| format!("读取响应数据失败：{}", e))?;
+            .map_err(|e| transport_err(&e))?;
             buf.truncate(read as usize);
             if buf.is_empty() {
                 break;
@@ -375,6 +399,31 @@ fn one(
             total,
             whole_total: whole_total.unwrap_or(total),
         })
+    }
+}
+
+/// Turn a failed HTTP attempt into a line a user can act on. CDN error bodies
+/// are JSON blobs (`{"errorcode":-46628,...}`) that mean nothing in a list row,
+/// so they are dropped in favour of a short explanation. The status code stays
+/// in the text because [`crate::downloads::link_retryable`] keys off it.
+pub(crate) fn friendly_http_error(status: u32, body: &[u8]) -> String {
+    let base = match status {
+        404 | 410 => format!("下载地址已失效（HTTP {}）", status),
+        403 => "下载被拒绝（HTTP 403），该地址可能需要登录或限制地区".to_string(),
+        429 => "请求过于频繁（HTTP 429），请稍后重试".to_string(),
+        500..=599 => format!("下载服务器暂时不可用（HTTP {}）", status),
+        400..=499 => format!("下载请求被拒绝（HTTP {}）", status),
+        _ => format!("下载失败（HTTP {}）", status),
+    };
+    // A plain-text body occasionally carries the real reason ("file not
+    // found"); JSON or HTML noise is dropped instead of flooding the row.
+    let text = String::from_utf8_lossy(body);
+    let text = text.trim();
+    let noisy = text.starts_with('{') || text.starts_with('<') || text.starts_with("<!DOCTYPE");
+    if text.is_empty() || noisy || text.chars().count() > 60 {
+        base
+    } else {
+        format!("{}：{}", base, text)
     }
 }
 
@@ -438,19 +487,7 @@ fn request(
             continue;
         }
         if !(200..300).contains(&r.status) {
-            let preview = String::from_utf8_lossy(&r.bytes);
-            return Err(format!(
-                "服务器返回 HTTP {}{}",
-                r.status,
-                if preview.trim().is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "（{}）",
-                        preview.trim().chars().take(80).collect::<String>()
-                    )
-                }
-            ));
+            return Err(friendly_http_error(r.status, &r.bytes));
         }
         if streaming {
             if let Some(expected) = r.content_length
@@ -595,6 +632,12 @@ pub fn details(token: &str, id: &str) -> Result<Detail, String> {
     serde_json::from_value::<Detail>(data).map_err(|e| e.to_string())
 }
 
+/// HEAD-probe a download link. Used to hide entries whose CDN object is gone:
+/// the Tencent list API keeps advertising files it has already deleted.
+pub fn url_alive(url: &str) -> bool {
+    http("HEAD", url, &[], None).is_ok()
+}
+
 /// Fetch a small binary resource (app icon).
 pub fn fetch_binary(url: &str) -> Result<Vec<u8>, String> {
     http("GET", url, &[], None)
@@ -682,6 +725,28 @@ mod tests {
     }
 
     #[test]
+    fn http_errors_read_like_advice_not_cdn_json() {
+        // A dead Tencent CDN answers with a JSON blob; the row must not show it.
+        let body = br#"{"errorcode":-46628,"errormsg":"file not found"}"#;
+        let msg = friendly_http_error(404, body);
+        assert!(msg.contains("下载地址已失效"), "{}", msg);
+        assert!(msg.contains("HTTP 404"), "status code stays for retry logic");
+        assert!(!msg.contains("errorcode"), "raw JSON must not leak: {}", msg);
+
+        // Plain-text bodies are short and useful enough to keep.
+        assert_eq!(
+            friendly_http_error(500, b"upstream timeout"),
+            "下载服务器暂时不可用（HTTP 500）：upstream timeout"
+        );
+        // HTML error pages are noise.
+        assert_eq!(
+            friendly_http_error(403, b"<html><body>denied</body></html>"),
+            "下载被拒绝（HTTP 403），该地址可能需要登录或限制地区"
+        );
+        assert_eq!(friendly_http_error(410, b""), "下载地址已失效（HTTP 410）");
+    }
+
+    #[test]
     fn parses_content_range_for_resume() {
         assert_eq!(
             parse_content_range("bytes 1048576-2097151/4194304"),
@@ -720,6 +785,37 @@ mod tests {
         let loc = r.location.expect("missing Location header");
         assert!(loc.starts_with("http://"), "unexpected Location: {}", loc);
         assert!(loc.contains(".exe"), "unexpected Location: {}", loc);
+    }
+
+    #[test]
+    #[ignore = "requires live network"]
+    fn live_tencent_stream_delivers_bytes() {
+        let url = "https://webcdn.m.qq.com/spcmgr/download/28160-110820-XYLinkClient-3.3.30.9093.exe";
+        let mut got = 0usize;
+        let mut total = 0u64;
+        let r = fetch_binary_stream_resume(
+            url,
+            0,
+            &mut |chunk: &[u8]| -> bool {
+                got += chunk.len();
+                got < 512 * 1024 // stop after half a megabyte
+            },
+            &mut |n: u64, _partial: bool| total = n,
+        );
+        println!("stream result={:?} bytes={} total={}", r.is_ok(), got, total);
+        assert!(got > 100_000, "no bytes arrived");
+    }
+
+    #[test]
+    #[ignore = "requires live network"]
+    fn live_print_lenovo_classes() {
+        let token = register().expect("register");
+        let groups = classes(&token).expect("classes");
+        for g in &groups {
+            for c in &g.list {
+                println!("CLASS code={} id={} name={}", g.code, c.id, c.name);
+            }
+        }
     }
 
     #[test]

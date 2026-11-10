@@ -13,10 +13,63 @@ use windows::core::{HSTRING, PCWSTR, w};
 use crate::app::{
     AppState, GAP, HIT_DL_CANCEL, HIT_DL_CLEAR, HIT_DL_INSTALL, HIT_DL_OPEN, HIT_DL_PAUSE,
     HIT_DL_REMOVE, HIT_DL_RETRY, NAV_W, PAD, Payload, STATUS_H, TOP_H, WM_APP_DL_DONE,
-    WM_APP_DL_PROGRESS, draw_button, in_rect, post,
+    WM_APP_DL_PROGRESS, WM_APP_FALLBACK, draw_button, in_rect, post,
 };
 use crate::gfx::{self, Color, Gfx, Palette};
+use crate::net;
 use crate::updates_ui;
+
+/// Rewrite a legacy error string (`服务器返回 HTTP 404（{"errorcode":…}）`) into
+/// the short wording the list rows expect. Anything already readable, or any
+/// non-HTTP failure (disk full, cancelled), is passed through untouched.
+pub(crate) fn sanitize_error(msg: &str) -> String {
+    const MARK: &str = "服务器返回 HTTP ";
+    if let Some(pos) = msg.find(MARK) {
+        let digits: String = msg[pos + MARK.len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(code) = digits.parse::<u32>() {
+            return crate::net::friendly_http_error(code, b"");
+        }
+    }
+    // 0.9.1 stored WinHTTP failures verbatim ("发送请求失败：0x80072EE7").
+    if let Some(pos) = msg.find("0x") {
+        let hex: String = msg[pos + 2..]
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .collect();
+        if hex.len() == 8
+            && let Ok(code) = u32::from_str_radix(&hex, 16)
+        {
+            return crate::net::friendly_transport_code(code);
+        }
+    }
+    msg.to_string()
+}
+
+/// Whether a failed transfer is worth re-resolving on another source: a static
+/// third-party link is worth exactly one retry, a per-request Lenovo link is
+/// not (its URL is generated fresh and would just fail again).
+pub(crate) fn link_retryable(already_failed_over: bool, url: &str, err: &str) -> bool {
+    if already_failed_over || url.contains("lenovomm.cn") {
+        return false;
+    }
+    // Third-party links die in two ways: the CDN answers 4xx/5xx, or the host
+    // stops resolving / refuses the connection (Tencent's older objects are
+    // mostly the second kind). Local failures — disk full, paused, cancelled —
+    // carry none of these markers and must not trigger a source switch.
+    const LINK_DEAD: [&str; 7] = [
+        "HTTP 4",
+        "HTTP 5",
+        "无法解析",
+        "无法连接",
+        "超时",
+        "连接被中断",
+        "下载地址格式无效",
+    ];
+    LINK_DEAD.iter().any(|m| err.contains(m))
+}
 
 pub(crate) const DL_ROW_H: f32 = 100.0;
 /// How many transfers may hold a slot at once. Three keeps a fast line busy
@@ -64,6 +117,9 @@ pub struct DlTask {
     pub path: Option<String>,
     pub error: Option<String>,
     pub cancel: Arc<AtomicBool>,
+    /// A dead third-party link was already replaced by a Lenovo one; a second
+    /// failure is final so we never loop between sources.
+    pub failover: bool,
 }
 
 impl DlTask {
@@ -396,6 +452,7 @@ impl AppState {
             path: None,
             error: None,
             cancel: Arc::new(AtomicBool::new(false)),
+            failover: false,
         });
         id
     }
@@ -407,10 +464,11 @@ impl AppState {
         let Some(t) = self.downloads.iter_mut().find(|t| t.id == id) else {
             return;
         };
-        // Already running or waiting: ignore. A Paused task (manually paused
-        // or restored from disk) is allowed through so it can continue from
-        // its partial bytes.
-        if matches!(t.state, DlState::Downloading | DlState::Queued) {
+        // Already transferring: nothing to do. A Queued task must still fall
+        // through to `pump()`, otherwise a freshly created task (which is born
+        // Queued) would sit in the list forever waiting for someone to kick the
+        // scheduler.
+        if t.state == DlState::Downloading {
             return;
         }
         let resume_from = updates_ui::partial_bytes(&t.name, &t.url);
@@ -556,7 +614,10 @@ impl AppState {
             self.next_dl_id += 1;
             let mut state = DlState::from(s.state);
             let mut path = s.path.clone();
-            let mut error = s.error.clone();
+            // Snapshots written by 0.9.1 and earlier keep the raw CDN body in
+            // `error`; rewrite them on the way in so an upgrade immediately
+            // shows a readable line instead of a JSON blob.
+            let mut error = s.error.clone().map(|e| sanitize_error(&e));
             let saved_done = updates_ui::partial_bytes(&s.name, &s.url);
             match state {
                 DlState::Done => {
@@ -592,6 +653,7 @@ impl AppState {
                 path,
                 error,
                 cancel: Arc::new(AtomicBool::new(false)),
+                failover: false,
             });
             restored += 1;
         }
@@ -650,6 +712,37 @@ impl AppState {
         self.invalidate();
     }
 
+    /// Result of the cross-source lookup started when a link died. `None`
+    /// means no source could offer a replacement, so the task stays failed
+    /// with the original error.
+    pub fn on_fallback(&mut self, id: u64, url: Option<String>) {
+        let Some(t) = self.downloads.iter_mut().find(|t| t.id == id) else {
+            return;
+        };
+        let name = t.name.clone();
+        match url {
+            Some(u) if u != t.url => {
+                t.url = u;
+                t.error = None;
+                t.done = 0;
+                t.total = 0;
+                // Failed (not Queued) so `start_task` does not short-circuit.
+                t.state = DlState::Failed;
+                self.status = format!("已为 {} 找到替代下载地址，正在重试…", name);
+                self.start_task(id);
+                self.invalidate();
+            }
+            Some(_) => {
+                self.status = format!("{} 的下载链接仍然不可用", name);
+                self.invalidate();
+            }
+            None => {
+                self.status = format!("{} 的下载链接已失效，其他源也没有可用安装包", name);
+                self.invalidate();
+            }
+        }
+    }
+
     pub fn on_dl_done(&mut self, id: u64, result: Result<String, String>) {
         let Some(t) = self.downloads.iter_mut().find(|t| t.id == id) else {
             return;
@@ -681,7 +774,28 @@ impl AppState {
                 t.error = Some(e.clone());
                 t.speed = 0.0;
                 t.disk_speed = 0.0;
-                self.status = format!("{} 下载未完成：{}", t.name, e);
+                // A third-party CDN object can disappear while the catalog
+                // still advertises it. Ask the Lenovo source for the same app
+                // once before giving up.
+                let retryable = link_retryable(t.failover, &t.url, &e);
+                let (name, id) = (t.name.clone(), t.id);
+                self.status = format!("{} 下载未完成：{}", name, e);
+                if retryable {
+                    if let Some(t) = self.downloads.iter_mut().find(|t| t.id == id) {
+                        t.failover = true;
+                    }
+                    let h = self.hwnd_usize();
+                    let token = self.token.clone();
+                    self.status = format!("{} 的直链已失效，正在从其他源重试…", name);
+                    std::thread::spawn(move || {
+                        let found = net::search(&token, &name).ok().and_then(|list| {
+                            list.into_iter()
+                                .find(|a| !a.download_url().is_empty())
+                                .map(|a| a.download_url())
+                        });
+                        post(h, WM_APP_FALLBACK, Payload::Fallback { id, url: found });
+                    });
+                }
             }
         }
         // An installer may have just been run from Downloads. Re-scan the
@@ -1475,7 +1589,72 @@ mod tests {
             path: None,
             error: None,
             cancel: Arc::new(AtomicBool::new(false)),
+            failover: false,
         }
+    }
+
+    #[test]
+    fn legacy_error_snapshots_are_rewritten_on_restore() {
+        let legacy = "服务器返回 HTTP 404（{\"errorcode\":-46628,\"errormsg\":\"file not found\"}）";
+        let clean = sanitize_error(legacy);
+        assert_eq!(clean, "下载地址已失效（HTTP 404）");
+        // Already-readable and non-HTTP failures must survive verbatim.
+        let short = "下载地址已失效（HTTP 404）";
+        assert_eq!(sanitize_error(short), short);
+        assert_eq!(sanitize_error("磁盘空间不足"), "磁盘空间不足");
+        assert_eq!(
+            sanitize_error("发送请求失败：0x80072EE7"),
+            "无法解析下载服务器域名（0x80072EE7）"
+        );
+        assert_eq!(
+            sanitize_error("服务器返回 HTTP 但状态码缺失"),
+            "服务器返回 HTTP 但状态码缺失"
+        );
+    }
+
+    #[test]
+    fn only_dead_third_party_links_trigger_a_failover() {
+        let dead = "服务器返回 HTTP 404（Err-Code: -46628）";
+        assert!(link_retryable(false, "https://webcdn.m.qq.com/x.exe", dead));
+        // DNS / connection failures are just as dead as a 404 and must fan out
+        // to another source; the Tencent CDN mostly fails this way.
+        assert!(link_retryable(
+            false,
+            "https://webcdn.m.qq.com/x.exe",
+            "无法解析下载服务器域名（0x80072EE7）"
+        ));
+        assert!(link_retryable(
+            false,
+            "https://webcdn.m.qq.com/x.exe",
+            "无法连接下载服务器（0x80072EFD）"
+        ));
+        assert!(link_retryable(
+            false,
+            "https://webcdn.m.qq.com/x.exe",
+            "连接下载服务器超时（0x80072EE2）"
+        ));
+        // Disk / user-driven failures stay put.
+        assert!(!link_retryable(
+            false,
+            "https://webcdn.m.qq.com/x.exe",
+            "写入磁盘失败：磁盘空间不足"
+        ));
+        assert!(!link_retryable(true, "https://webcdn.m.qq.com/x.exe", dead),
+            "a second failure must be final");
+
+        assert!(
+            !link_retryable(
+                false,
+                "https://pc-store.lenovomm.cn/dlservice/download?softid=L1",
+                dead
+            ),
+            "Lenovo links are generated per request"
+        );
+        assert!(!link_retryable(
+            false,
+            "https://webcdn.m.qq.com/x.exe",
+            "已暂停"
+        ));
     }
 
     #[test]

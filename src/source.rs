@@ -26,24 +26,27 @@ pub const TENCENT: &str = "腾讯";
 
 /// Tencent category ids shown on pc.qq.com. One request each; the API always
 /// returns the most popular 28 entries of a category regardless of `p`/`n`.
+/// Tencent category id → the category name the sidebar already uses (Lenovo's
+/// vocabulary). Keeping one shared label is what lets a category page mix both
+/// sources with a plain string comparison and no extra request.
 const TENCNET_CATEGORIES: [(u32, &str); 18] = [
     (1, "聊天社交"),
     (2, "输入法"),
     (3, "浏览器"),
-    (4, "网盘下载"),
-    (5, "影音播放"),
-    (6, "音乐"),
-    (7, "图形图像"),
-    (8, "安全"),
-    (9, "压缩刻录"),
+    (4, "下载工具"),
+    (5, "视频软件"),
+    (6, "音乐软件"),
+    (7, "图片图形"),
+    (8, "安全防护"),
+    (9, "解压刻录"),
     (10, "系统工具"),
-    (11, "驱动程序"),
-    (12, "办公商务"),
-    (13, "开发工具"),
-    (14, "网银支付"),
-    (15, "视频剪辑"),
+    (11, "驱动工具"),
+    (12, "办公教育"),
+    (13, "编程软件"),
+    (14, "理财金融"),
+    (15, "剪辑工具"),
     (16, "游戏"),
-    (17, "游戏平台"),
+    (17, "助手工具"),
     (18, "桌面美化"),
 ];
 
@@ -63,6 +66,114 @@ pub struct Settings {
     pub disabled: Vec<String>,
     #[serde(default)]
     pub custom: Vec<CustomSource>,
+}
+
+/// HEAD-probe verdicts, so a launch costs nothing after the first check.
+/// The Tencent list API keeps returning links to files its CDN already
+/// deleted (~half of them in testing), and downloading those fails instantly
+/// with HTTP 404. Probing once and hiding the corpses is the only fix that
+/// does not require an undocumented API.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct UrlVerdict {
+    ok: bool,
+    /// Unix seconds of the probe that produced this verdict.
+    ts: u64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct UrlCheck {
+    #[serde(default)]
+    checks: std::collections::HashMap<String, UrlVerdict>,
+}
+
+/// A verdict older than this is re-probed on the next launch.
+const VERDICT_TTL: u64 = 24 * 3600;
+/// Verdicts this old are dropped from the file entirely.
+const VERDICT_KEEP: u64 = 7 * 24 * 3600;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn check_path() -> Option<PathBuf> {
+    let base = std::env::var("LOCALAPPDATA").ok()?;
+    Some(PathBuf::from(base).join("MindosShop").join("urlcheck.json"))
+}
+
+impl UrlCheck {
+    pub fn load() -> Self {
+        let Some(p) = check_path() else {
+            return Self::default();
+        };
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// `Some(true/false)` when the verdict is still trusted, `None` when the
+    /// link has never been probed or the verdict went stale.
+    pub fn verdict(&self, url: &str) -> Option<bool> {
+        let v = self.checks.get(url)?;
+        (now_secs().saturating_sub(v.ts) < VERDICT_TTL).then_some(v.ok)
+    }
+
+    pub fn record(&mut self, url: &str, ok: bool) {
+        self.checks
+            .insert(url.to_string(), UrlVerdict { ok, ts: now_secs() });
+    }
+
+    pub fn save(&self) {
+        let Some(p) = check_path() else { return };
+        let now = now_secs();
+        let mut pruned = Self::default();
+        for (url, v) in &self.checks {
+            if now.saturating_sub(v.ts) < VERDICT_KEEP {
+                pruned.checks.insert(url.clone(), *v);
+            }
+        }
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(s) = serde_json::to_string(&pruned) {
+            let _ = std::fs::write(p, s);
+        }
+    }
+}
+
+/// Probe every URL with a bounded number of workers. Probing sequentially
+/// would take a minute for a full catalog; this finishes in a few seconds.
+pub fn probe_urls(urls: Vec<String>) -> Vec<(String, bool)> {
+    const WORKERS: usize = 12;
+    if urls.is_empty() {
+        return Vec::new();
+    }
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+        urls,
+    )));
+    let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    std::thread::scope(|scope| {
+        for _ in 0..WORKERS.min(queue.lock().map(|q| q.len()).unwrap_or(0)) {
+            let queue = std::sync::Arc::clone(&queue);
+            let out = std::sync::Arc::clone(&out);
+            scope.spawn(move || {
+                loop {
+                    let next = queue.lock().ok().and_then(|mut q| q.pop_front());
+                    let Some(url) = next else { break };
+                    let ok = net::url_alive(&url);
+                    if let Ok(mut o) = out.lock() {
+                        o.push((url, ok));
+                    }
+                }
+            });
+        }
+    });
+    std::sync::Arc::try_unwrap(out)
+        .map(|m| m.into_inner().unwrap_or_default())
+        .unwrap_or_default()
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -328,6 +439,7 @@ fn tencent() -> Result<Vec<App>, String> {
                 dl_b: None,
                 is_advert: None,
                 source: Some(TENCENT.into()),
+                category: Some(label.to_string()),
             });
         }
     }
@@ -395,6 +507,7 @@ fn parse_custom(item: &serde_json::Value, source: &str) -> Option<App> {
         dl_b: None,
         is_advert: None,
         source: Some(source.to_string()),
+        category: text("category"),
     })
 }
 
@@ -428,6 +541,44 @@ mod tests {
             source: Some(source.into()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn link_verdicts_are_cached_and_reused() {
+        let mut c = UrlCheck::default();
+        assert_eq!(c.verdict("https://e/a.exe"), None, "unprobed link");
+        c.record("https://e/a.exe", true);
+        assert_eq!(c.verdict("https://e/a.exe"), Some(true));
+        c.record("https://e/b.exe", false);
+        assert_eq!(c.verdict("https://e/b.exe"), Some(false));
+    }
+
+    /// Tencent's category names must be spelled exactly like the sidebar's, or
+    /// a category page silently loses every Tencent row.
+    #[test]
+    fn tencent_categories_match_the_sidebar_vocabulary() {
+        let want = [
+            "聊天社交",
+            "输入法",
+            "浏览器",
+            "下载工具",
+            "视频软件",
+            "音乐软件",
+            "图片图形",
+            "安全防护",
+            "解压刻录",
+            "系统工具",
+            "驱动工具",
+            "办公教育",
+            "编程软件",
+            "理财金融",
+            "剪辑工具",
+            "游戏",
+            "助手工具",
+            "桌面美化",
+        ];
+        let got: Vec<&str> = TENCNET_CATEGORIES.iter().map(|(_, l)| *l).collect();
+        assert_eq!(got, want);
     }
 
     #[test]

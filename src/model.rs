@@ -38,6 +38,10 @@ pub struct App {
     /// only publishes a category, custom feeds may ship a sentence).
     #[serde(default)]
     pub desc: Option<String>,
+    /// Category in the *store's* vocabulary (`聊天社交`, `浏览器`, …), so a
+    /// category page can mix rows from every source without another request.
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 impl App {
@@ -224,6 +228,7 @@ pub fn parse_apps(data: &serde_json::Value) -> Vec<App> {
             is_advert: is_ad,
             source: None,
             desc: None,
+            category: None,
         };
         if a.is_advert == Some(true) || a.name.trim().is_empty() {
             continue;

@@ -222,6 +222,10 @@ pub(crate) fn download_package_ex(
         let _ = file.seek(std::io::SeekFrom::End(0));
     }
 
+    crate::net::log(&format!(
+        "DL start name={} resume={} existing={} tmp={}",
+        name, resume, existing, tmp
+    ));
     let mut total = 0usize;
     let mut write_error: Option<String> = None;
     // Both the header (`meta`) and body (`sink`) callbacks touch progress, so
@@ -247,6 +251,10 @@ pub(crate) fn download_package_ex(
             }
         };
         let mut sink = |chunk: &[u8]| -> bool {
+            if !started.get() {
+                started.set(true);
+                crate::net::log(&format!("DL first chunk {} B", chunk.len()));
+            }
             if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
                 return false;
             }

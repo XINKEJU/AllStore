@@ -1324,9 +1324,9 @@ impl AppState {
 
         let logo = gfx::rect(20.0, 18.0, 56.0, 54.0);
         self.gfx.round(logo, 10.0, p.accent);
-        self.gfx.center_text("M", logo, 18, true, p.on_accent);
+        self.gfx.center_text("A", logo, 18, true, p.on_accent);
         self.gfx.text(
-            "MindosShop",
+            "AllStore",
             gfx::rect(66.0, 12.0, 240.0, 38.0),
             17,
             true,
@@ -1469,7 +1469,7 @@ impl AppState {
             gfx::rect(12.0, footer_top, NAV_W - 12.0, footer_top + 1.0),
             p.border,
         );
-        let version = format!("MindosShop v{}", env!("CARGO_PKG_VERSION"));
+        let version = format!("AllStore v{}", env!("CARGO_PKG_VERSION"));
         self.gfx.text(
             &version,
             gfx::rect(20.0, footer_top + 4.0, NAV_W - 16.0, h - STATUS_H - 6.0),

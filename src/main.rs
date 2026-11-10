@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![allow(unsafe_op_in_unsafe_fn)]
-//! MindosShop — a pure native Windows app store client.
+//! AllStore — a pure native Windows app store client.
 //! Single executable, one process, no runtime, no browser, no telemetry.
 
 mod app;
@@ -36,13 +36,47 @@ fn fatal(text: &str) {
         let _ = MessageBoxW(
             None,
             &HSTRING::from(text),
-            w!("MindosShop"),
+            w!("AllStore"),
             MB_ICONERROR | MB_OK,
         );
     }
 }
 
+/// One-time data migration from the pre-rename layout (`MindosShop`) to the
+/// current one (`AllStore`). Copies every `*.json` state file (downloads,
+/// urlcheck, mirrors, sources, github, updates) so an upgrade keeps the
+/// download queue, dead-link verdicts and update cache intact. Best-effort:
+/// any failure simply falls back to a fresh state dir.
+fn migrate_legacy_data() {
+    use std::path::PathBuf;
+    let Some(base) = std::env::var("LOCALAPPDATA").ok() else {
+        return;
+    };
+    let old = PathBuf::from(&base).join("MindosShop");
+    let new = PathBuf::from(&base).join("AllStore");
+    if !old.is_dir() || new.exists() {
+        return;
+    }
+    if std::fs::create_dir_all(&new).is_err() {
+        return;
+    }
+    let _ = std::fs::read_dir(&old).map(|rd| {
+        for e in rd.flatten() {
+            if e.path().extension().is_some_and(|x| x == "json") {
+                let _ = std::fs::copy(e.path(), new.join(e.file_name()));
+            }
+        }
+    });
+    // Stale `.part` fragments live under `%TEMP%\MindosShop`; the old cleanup
+    // pass will not run anymore after the rename, so sweep the dir once here.
+    let legacy_tmp = std::env::temp_dir().join("MindosShop");
+    if legacy_tmp.is_dir() {
+        let _ = std::fs::remove_dir_all(legacy_tmp);
+    }
+}
+
 fn main() {
+    migrate_legacy_data();
     unsafe {
         // Prefer per-monitor DPI v2 so a window dragged between monitors keeps
         // crisp text; fall back to the legacy system-DPI API on older Windows.
@@ -53,7 +87,7 @@ fn main() {
 
         let hmod = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
         let instance = HINSTANCE(hmod.0);
-        let class_name = w!("MindosShopWindow");
+        let class_name = w!("AllStoreWindow");
         let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
 
         let wc = WNDCLASSEXW {
@@ -73,7 +107,7 @@ fn main() {
         let hwnd = match CreateWindowExW(
             WINDOW_EX_STYLE(0),
             class_name,
-            w!("MindosShop"),
+            w!("AllStore"),
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             120,
             90,

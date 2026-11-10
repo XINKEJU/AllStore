@@ -59,7 +59,7 @@ pub fn now() -> u64 {
 
 fn cache_path() -> Option<PathBuf> {
     let base = std::env::var("LOCALAPPDATA").ok()?;
-    Some(PathBuf::from(base).join("MindosShop").join("updates.json"))
+    Some(PathBuf::from(base).join("AllStore").join("updates.json"))
 }
 
 pub fn load_cache() -> Cache {

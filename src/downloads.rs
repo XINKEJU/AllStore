@@ -1800,7 +1800,7 @@ mod tests {
     #[test]
     fn missing_installer_path_is_reported_not_launched() {
         // A path that cannot exist must fail before any shell call.
-        let err = run_installer("C:\\__mindosshop_no_such_installer__.exe").unwrap_err();
+        let err = run_installer("C:\\__allstore_no_such_installer__.exe").unwrap_err();
         assert!(err.contains("不存在"), "unexpected message: {err}");
     }
 

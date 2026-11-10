@@ -16,3 +16,5 @@ node_modules/
 # recipe that produced assets/github.json and has to ship with the source.
 *.py
 !/tools/verify_github.py
+# Icon recipe (Pillow) — ships with the source, unlike the ad-hoc helpers.
+!/tools/make_icon.py

@@ -32,22 +32,42 @@ jobs:
       - name: Build release
         run: cargo build --release --locked
 
-      - name: Report size
+      - name: Install WiX 5
         shell: pwsh
         run: |
-          $f = Get-Item target/release/mindosshop.exe
-          "mindosshop.exe = $([math]::Round($f.Length / 1KB, 1)) KB" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          dotnet tool install --global wix --version 5.0.2
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $wix = Join-Path $env:USERPROFILE ".dotnet\tools\wix.exe"
+          & $wix extension add -g WixToolset.UI.wixext/5.0.2
+          & $wix extension add -g WixToolset.Util.wixext/5.0.2
 
-      - name: Upload artifact
+      - name: Package MSI + portable bundle
+        shell: pwsh
+        run: ./tools/build_msi.ps1 -SkipBuild
+
+      - name: Report sizes
+        shell: pwsh
+        run: |
+          Get-ChildItem dist/AllStore-* |
+            ForEach-Object { "$($_.Name) = $([math]::Round($_.Length / 1KB, 1)) KB" } |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: mindosshop-windows-x64
-          path: target/release/mindosshop.exe
+          name: allstore-windows-x64
+          path: |
+            dist/AllStore-*.msi
+            dist/AllStore-*.zip
+            dist/AllStore-*.exe
           if-no-files-found: error
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/mindosshop.exe
+          files: |
+            dist/AllStore-*.msi
+            dist/AllStore-*.zip
+            dist/AllStore-*.exe
           generate_release_notes: true

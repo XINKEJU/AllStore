@@ -18,7 +18,7 @@ use crate::model::{self, App, BASE, CH, ClassGroup, Detail};
 /// session cannot grow it without limit; response bodies are never logged.
 pub fn log(msg: &str) {
     let dir = std::env::var("TEMP").unwrap_or_else(|_| ".".into());
-    let path = format!("{}\\mindosshop.log", dir);
+    let path = format!("{}\\allstore.log", dir);
     if let Ok(md) = std::fs::metadata(&path)
         && md.len() > 1_048_576
     {
@@ -269,7 +269,7 @@ fn one(
         let u = split_url(url)?;
         let mut handles = Handles::new();
         let session = handles.add(WinHttpOpen(
-            &hs("MindosShop/1.0"),
+            &hs("AllStore/1.0"),
             WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
             PCWSTR::null(),
             PCWSTR::null(),

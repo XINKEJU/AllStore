@@ -9,7 +9,7 @@
 //! * **Tencent** – the public `softlistcgi.php` JSON used by 腾讯软件中心.
 //!   No token, no ads, direct CDN links, verified to answer `Range` requests.
 //! * **Custom** – any URL that returns a JSON array of apps; users add these
-//!   in `%LOCALAPPDATA%\MindosShop\sources.json`.
+//!   in `%LOCALAPPDATA%\AllStore\sources.json`.
 //!
 //! A failing source degrades to a warning instead of an empty store: the
 //! catalog is the union of whatever answered.
@@ -100,7 +100,7 @@ fn now_secs() -> u64 {
 
 fn check_path() -> Option<PathBuf> {
     let base = std::env::var("LOCALAPPDATA").ok()?;
-    Some(PathBuf::from(base).join("MindosShop").join("urlcheck.json"))
+    Some(PathBuf::from(base).join("AllStore").join("urlcheck.json"))
 }
 
 impl UrlCheck {
@@ -196,7 +196,7 @@ const MIRROR_TTL: u64 = 14 * 24 * 3600;
 
 fn mirror_path() -> Option<PathBuf> {
     let base = std::env::var("LOCALAPPDATA").ok()?;
-    Some(PathBuf::from(base).join("MindosShop").join("mirrors.json"))
+    Some(PathBuf::from(base).join("AllStore").join("mirrors.json"))
 }
 
 impl Mirrors {
@@ -421,7 +421,7 @@ fn apply_repairs(
 
 fn settings_path() -> Option<PathBuf> {
     let base = std::env::var("LOCALAPPDATA").ok()?;
-    Some(PathBuf::from(base).join("MindosShop").join("sources.json"))
+    Some(PathBuf::from(base).join("AllStore").join("sources.json"))
 }
 
 pub fn load_settings() -> Settings {
@@ -877,7 +877,7 @@ const GH_TTL: u64 = 24 * 3600;
 
 fn gh_path() -> Option<PathBuf> {
     let base = std::env::var("LOCALAPPDATA").ok()?;
-    Some(PathBuf::from(base).join("MindosShop").join("github.json"))
+    Some(PathBuf::from(base).join("AllStore").join("github.json"))
 }
 
 impl GhCache {
@@ -903,7 +903,7 @@ impl GhCache {
 
 fn gh_headers() -> [(&'static str, String); 2] {
     [
-        ("User-Agent", "MindosShop".into()),
+        ("User-Agent", "AllStore".into()),
         ("Accept", "application/vnd.github+json".into()),
     ]
 }

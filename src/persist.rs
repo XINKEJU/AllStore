@@ -2,7 +2,7 @@
 //!
 //! Tasks live in memory as `DlTask` (which holds non-serializable runtime
 //! handles). This module mirrors just the durable fields into a small JSON
-//! file under `%LOCALAPPDATA%\MindosShop\downloads.json`, so a restart can
+//! file under `%LOCALAPPDATA%\AllStore\downloads.json`, so a restart can
 //! restore the list and resume an interrupted transfer from its `.part` file.
 //!
 //! Nothing about the local machine is transmitted: this is a local cache only.
@@ -73,11 +73,7 @@ impl From<SavedState> for DlState {
 
 fn path() -> Option<PathBuf> {
     let base = std::env::var("LOCALAPPDATA").ok()?;
-    Some(
-        PathBuf::from(base)
-            .join("MindosShop")
-            .join("downloads.json"),
-    )
+    Some(PathBuf::from(base).join("AllStore").join("downloads.json"))
 }
 
 pub fn save(tasks: &[TaskSnapshot]) {

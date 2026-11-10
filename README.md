@@ -1,20 +1,53 @@
-# MindosShop
+# AllStore
 
-一个纯净、轻量的原生 Windows 应用商店客户端。以联想应用商店与腾讯软件中心的公开内容接口作为数据源（可再加自定义 JSON 源），但**不含**广告、运营位、捆绑推荐、热搜推广词与遥测上报。
+<img src="assets/icon.png" width="96" alt="AllStore icon">
 
-当前版本：**0.10.0**
+> **AllStore**（原 MindosShop）—— 聚合联想、腾讯与 GitHub 三个来源的原生 Windows 软件商店，851 款应用，单文件 751 KB。
+
+一个纯净、轻量的原生 Windows 应用商店客户端。以联想应用商店、腾讯软件中心的公开内容接口与 GitHub Release 作为数据源（可再加自定义 JSON 源），但**不含**广告、运营位、捆绑推荐、热搜推广词与遥测上报。
+
+当前版本：**0.11.0**
 
 ## 为什么是它
 
-原版联想应用商店便携剪枝后仍有 235 MB / 5 个进程（CEF 浏览器壳），且在线 UI 由服务器下发，运营推广位无法从本地文件彻底移除。MindosShop 直接以合法客户端身份调用内容 API，自己绘制界面：
+原版联想应用商店便携剪枝后仍有 235 MB / 5 个进程（CEF 浏览器壳），且在线 UI 由服务器下发，运营推广位无法从本地文件彻底移除。AllStore 直接以合法客户端身份调用内容 API，自己绘制界面：
 
-| | 原版（剪枝后） | MindosShop |
+| | 原版（剪枝后） | AllStore |
 |---|---|---|
-| 交付体积 | 234.9 MB | **585 KB（单 exe，静态 CRT）** |
+| 交付体积 | 234.9 MB | **751 KB（单 exe，静态 CRT）** |
 | 进程数 | 5 | **1** |
 | 窗口 | CEF 浏览器壳 | **真 HWND** |
 | 运行时 | CEF + 124 版 Chromium | **无（仅系统 DLL）** |
 | 运营广告位 | 服务端下发，本地管不到 | **从不请求** |
+
+## 更名 AllStore、图标与安装包（0.11.0）
+
+名字、图标与分发形态在这个版本一起换了。旧名 MindosShop 是「Mindows + shop」的临时拼词，既不好念也不说明它做什么；新名 **AllStore** 直白地对应这版的核心能力——**所有来源放进同一个货架**。
+
+**图标**是几何绘制的，不是找图改图：`tools/make_icon.py` 用 Pillow 生成 1024 px 母版再降采样，蓝→青 Fluent 渐变圆角方块 + 白色「带四格橱窗的购物袋」。图标里的窗格是承重的：它同时是 Windows 的窗口意象和商店的橱窗意象。
+
+- 输出 7 档：`256 / 128 / 64 / 48 / 32 / 24 / 16`，`assets/allstore.ico` 单文件多帧
+- **16 / 24 px 单独画了一版**（纯白袋身、没有窗格）：原图缩到这么小，窗格缝隙会糊成一团噪点，实心剪影反而干净——上面那张尺寸对照表就是为此验的
+- 通过 `build.rs` + `winresource` 编译进 PE 资源段，资源管理器 / 任务栏 / Alt-Tab / 任务管理器统一显示；同时写入 `ProductName` `FileVersion` `FileDescription` `LegalCopyright`，版本号只从 `Cargo.toml` 取，不会漂
+- 附带 `assets/icon.png`（256）与 `icon-512.png` 供 README、商店页使用
+
+**两种分发形态**，都在 `dist/` 下：
+
+| 产物 | 体积 | 说明 |
+|---|---|---|
+| `AllStore-0.11.0-x64.msi` | 1.07 MB | 用户级安装包，**不弹 UAC** |
+| `AllStore-0.11.0-windows-x64.zip` | 0.38 MB | 便携包：exe + LICENSE + 说明 |
+| `AllStore-0.11.0-windows-x64.exe` | 0.73 MB | 裸 exe，双击即用 |
+
+MSI 用 WiX v5 构建（`installer/allstore.wxs`，`tools/build_msi.ps1` 一条命令出全套）：
+
+- `Scope="perUser"`：装到 `%LOCALAPPDATA%\AllStore`，普通用户直接装完，没有提权提示
+- 开始菜单 + 桌面快捷方式、Add/Remove Programs 条目都带图标；`MajorUpgrade` 原地升级，不产生两份安装
+- 升级时若程序正在运行，`util:CloseApplication` 会提示关闭而不是报「文件被占用」失败；用户数据目录不动
+- 卸载只删 exe 与快捷方式，**不碰** `%LOCALAPPDATA%\AllStore\*.json`（下载队列、忽略列表、缓存）
+- 通过 ICE 校验（ICE38/ICE43 已按 per-user 规范改成 HKCU 键做 KeyPath）；MSI 内嵌的 exe 与 `cargo build` 产物 SHA256 逐字节一致（`wix msi decompile -x` 解出载荷后比对）
+
+**旧数据自动迁移**：首次启动若发现 `%LOCALAPPDATA%\MindosShop` 而 `AllStore` 还不存在，会把 `downloads.json` / `urlcheck.json` / `mirrors.json` / `sources.json` / `github.json` / `updates.json` 全部复制过来，并清掉 `%TEMP%\MindosShop` 里的残包目录。升级后下载队列、已忽略的更新、死链修复结果都还在（本机实测队列与 7 个待更新项原样恢复）。
 
 ## 技术架构
 
@@ -46,7 +79,7 @@
 - 横幅内新增来源标签：`全部源 / 联想 / 腾讯 / GitHub / …`，点击即按源过滤（纯内存，不发请求）；进入某个分类时若该分类只有联想数据，筛选自动回到「全部源」而不是空白页
 - 单个源超时或格式变更只降级成一条告警，其余源照常出目录；全部源都失败才报错
 - 搜索＝联想服务端搜索 + 已加载目录的本地匹配，因此腾讯与自定义源里的软件也能被搜到
-- 关闭或新增来源：`%LOCALAPPDATA%\MindosShop\sources.json`
+- 关闭或新增来源：`%LOCALAPPDATA%\AllStore\sources.json`
 
 ```json
 {
@@ -66,7 +99,7 @@
 **关闭再打开可以继续下载**：旧版每次启动都从 0 开始，因为任务只存在内存里、`.part` 名字带纳秒时间戳，重启后既找不到任务也找不到文件。
 
 - `.part` 改成 `FNV64(名称 + 下载地址)` 的稳定名，重启后仍能对上同一个任务的残包
-- 任务表落盘到 `%LOCALAPPDATA%\MindosShop\downloads.json`；启动时恢复，被上次关机打断的任务恢复为**已暂停**（不会自动重连），点「继续」即从已有字节续传
+- 任务表落盘到 `%LOCALAPPDATA%\AllStore\downloads.json`；启动时恢复，被上次关机打断的任务恢复为**已暂停**（不会自动重连），点「继续」即从已有字节续传
 - 续传使用 `Range: bytes=N-`，并且**每次 302 跳转都重新附带**该头（商店 → 明文 CDN 的跳转会丢掉自定义头）；解析 `206 Partial Content` + `Content-Range` 得到整包大小，进度条从真实百分比开始
 - 服务器忽略 Range 返回 `200` 时，检测到「有残包但不是 206」就先截断再从头写，绝不把整包拼在半包后面
 - 下载管理新增「暂停」（保留进度）与「继续」；「取消 / 移除」才丢弃残包。残包清理窗口从 6 小时放宽到 7 天，且**在册任务的残包永不删除**
@@ -97,14 +130,14 @@
 
 所以不存在「换个更新的接口就能拿到活链」这条捷径，可行的根本解法只有一条：**不再相信源给的地址，自己把每一行修好**。
 
-- 启动时对聚合目录里**尚未探过**的直链发 `HEAD`（12 个 worker 并发），结果写入 `%LOCALAPPDATA%\MindosShop\urlcheck.json`（24 小时内复用，7 天后清理），第二次启动不再探测
+- 启动时对聚合目录里**尚未探过**的直链发 `HEAD`（12 个 worker 并发），结果写入 `%LOCALAPPDATA%\AllStore\urlcheck.json`（24 小时内复用，7 天后清理），第二次启动不再探测
 - 判定为死链的行**不再直接删除**：腾讯行拿软件名去其他源搜同款，命中就把 `dl_a` 换成可用链接，名称 / 图标 / 分类 / 简介全部保留；联想行则清掉厂商自己的失效链接，回落到商店按 `softid` 现签的 `dlservice` 地址。两条都是「就地修好」，目录广度一点不损失
-- 修好的映射写入 `%LOCALAPPDATA%\MindosShop\mirrors.json`（14 天有效），所以只有**首次启动**要付一次代价（实测探测 7.1 s + 换源 4.3 s，8 并发），之后秒开
+- 修好的映射写入 `%LOCALAPPDATA%\AllStore\mirrors.json`（14 天有效），所以只有**首次启动**要付一次代价（实测探测 7.1 s + 换源 4.3 s，8 并发），之后秒开
 - 实测：243 条死链 **243 条修好、0 条被丢弃**；首页从 575 款回到 **736 款**（联想 341 / 腾讯 395），微信、腾讯QQ、TIM 等重新上架且可下载
 - 万一仍然漏网（探测通过但下载时已失效），下载失败会自动去其他源搜同名软件换直链重试**一次**；换源后再失败就是终态，不会在源之间来回弹
 - 判「链接已死」不只认 HTTP 4xx/5xx：`无法解析域名` / `无法连接` / `超时` / `连接被中断` 同样算死链——腾讯那批老对象里 DNS 失败与对象删除混在一起，只按状态码判断会漏掉一大半
 - 失败行的文案改成能看懂的短句：`下载地址已失效（HTTP 404）` / `下载被拒绝（HTTP 403），该地址可能需要登录或限制地区` / `下载服务器暂时不可用（HTTP 5xx）`，不再把 CDN 返回的 `{"errorcode":-46628,…}` 原样贴进列表
-- `%TEMP%\mindosshop.log` 里可查 `REPAIR probed=/dead=/rehomed=/dropped=`、`HTTP HEAD … status=404` 与 `DL start` / `DL first chunk` 三类行，定位「到底哪一步没走通」
+- `%TEMP%\allstore.log` 里可查 `REPAIR probed=/dead=/rehomed=/dropped=`、`HTTP HEAD … status=404` 与 `DL start` / `DL first chunk` 三类行，定位「到底哪一步没走通」
 
 ## 开源货架：第四来源（0.10.0）
 
@@ -130,7 +163,7 @@
 
 - 先问 REST API `repos/{repo}/releases/latest`：一次往返约 0.8 秒，代价是匿名配额 60 次/小时
 - 配额用完或接口异常，回落到 Release 页解析：`/releases/latest` 拿 tag，再取 `expanded_assets/<tag>` 片段里的资产列表，两次请求、不受配额限制
-- 结果写进 `%LOCALAPPDATA%\MindosShop\github.json`，24 小时内复用，所以同一个卡片第二次点击是瞬时的
+- 结果写进 `%LOCALAPPDATA%\AllStore\github.json`，24 小时内复用，所以同一个卡片第二次点击是瞬时的
 - 解析失败（仓库改行源码发布、只发 ARM 包等）会走既有的跨源换源：用软件名去联想搜索，命中就换链接重试一次
 
 **选包规则**（纯函数 `pick_windows_asset`，单测覆盖）：
@@ -218,7 +251,7 @@
 - 图标请求从「一次 28 个线程」改为 6 线程固定工作池 + 队列，避免 WinHTTP 拥塞拖慢首屏
 - per-monitor DPI v2 + `WM_DPICHANGED`，窗口跨不同缩放显示器拖动时重新设置 D2D DPI 并清布局缓存，文字不再忽大忽小
 - `EndDraw` 失败时自动重建渲染目标（驱动重置 / RDP 重连 / 休眠恢复后窗口不再全黑）；`GetMessageW == -1` 不再空转占满一个核心
-- `.part` 临时文件移入 `%TEMP%\MindosShop` 并在启动时清理超过 6 小时的残包，不再污染 `Downloads`；跨卷保存自动回退为复制
+- `.part` 临时文件移入 `%TEMP%\AllStore` 并在启动时清理超过 6 小时的残包，不再污染 `Downloads`；跨卷保存自动回退为复制
 - 32 个测试（27 单元 + 5 联网冒烟），`cargo clippy -- -D warnings` 与 `cargo fmt --check` 均通过
 
 真实窗口验证：1100×720 与最大化 2560×1528（125% DPI）下，分别截取首页 / 详情 / 软件更新 / 下载管理 / 下载中五个界面，文字无重叠、遮挡或截断。
@@ -279,9 +312,9 @@
 
 **腾讯源与自定义源只发送列表请求**：`s.pcmgr.qq.com` 的公开列表接口不带任何标识；自定义源的 URL 由用户自己填写。来源可在 `sources.json` 中关闭。
 
-**软件更新是纯本地比对**：程序读取本机卸载项注册表得到「名称 + 版本」，再从商店目录取回「名称 + 版本」，两者只在本机内存中匹配；**本机装了什么软件从不发送给服务器**。检查结果缓存于 `%LOCALAPPDATA%\MindosShop\updates.json`，可随时删除。本机实测扫描到 152 个已安装应用并匹配出 8–9 个可更新项。
+**软件更新是纯本地比对**：程序读取本机卸载项注册表得到「名称 + 版本」，再从商店目录取回「名称 + 版本」，两者只在本机内存中匹配；**本机装了什么软件从不发送给服务器**。检查结果缓存于 `%LOCALAPPDATA%\AllStore\updates.json`，可随时删除。本机实测扫描到 152 个已安装应用并匹配出 8–9 个可更新项。
 
-本地诊断日志写在 `%TEMP%\mindosshop.log`，超过 1 MB 自动轮转；**不记录响应体或搜索关键词**。
+本地诊断日志写在 `%TEMP%\allstore.log`，超过 1 MB 自动轮转；**不记录响应体或搜索关键词**。
 
 ## 功能
 
@@ -304,27 +337,38 @@
 ```powershell
 # 需要 Rust（MSVC 工具链，edition 2024 需 >= 1.85）与 Windows SDK
 cargo build --release
-# 产物：target\release\mindosshop.exe
+# 产物：target\release\allstore.exe（图标与版本信息由 build.rs 写入）
 
-cargo test                           # 55 个单元测试（布局几何、文本测量、搜索光标、速度采样、更新重扫描、多源聚合、解析回归）
+cargo test                           # 72 个单元测试（布局几何、文本测量、搜索光标、速度采样、更新重扫描、多源聚合、GitHub 选包、解析回归）
 cargo test -- --ignored --nocapture  # 8 个联网冒烟测试（302 / 真实下载 / 进度头 / 断点续传 / 腾讯源 / 多源合并 / 更新匹配）
 cargo clippy --all-targets           # 零警告
 cargo fmt --check
+
+# 重画图标（Pillow）：assets/allstore.ico + icon.png + icon-512.png
+python tools\make_icon.py
+
+# MSI + 便携包（需要 WiX 5：dotnet tool install -g wix --version 5.0.2）
+# 先 wix extension add -g WixToolset.UI.wixext/5.0.2 与 WixToolset.Util.wixext/5.0.2
+powershell -File tools\build_msi.ps1
 ```
 
 联网冒烟测试默认忽略，其中「真实下载」会向 `Downloads` 写入约 1 MB 的自检安装包，校验通过后自动删除。
 
-GitHub Actions 会在 `windows-latest` 上构建并上传 `mindosshop-windows-x64` artifact；打 `v*` tag 时自动创建 Release。
+`tools/build_msi.ps1` 一次产出 `dist\` 下的 msi / zip / exe 三件套；GitHub Actions 在 `windows-latest` 上跑同一条脚本并上传 `allstore-windows-x64` artifact，打 `v*` tag 时自动创建 Release 并附上三个文件。
 
 ## 安装
 
-解压发布包后双击 `Install.cmd`（或直接运行 `mindosshop.exe` 免安装使用）。安装为**用户级、无需管理员**：
+**MSI（推荐）**：双击 `AllStore-0.11.0-x64.msi`，向导装完即可。用户级安装、不需要管理员权限，装到：
 
 ```
-%LOCALAPPDATA%\MindosShop\mindosshop.exe
+%LOCALAPPDATA%\AllStore\allstore.exe
 ```
 
-同时创建开始菜单快捷方式与「添加或删除程序」卸载项。程序不写注册表配置、不驻留服务、不设开机自启；仅把更新检查缓存写入 `%LOCALAPPDATA%\MindosShop\updates.json`。exe 未签名，首次运行若被 SmartScreen 拦截，点「更多信息 → 仍要运行」。
+同时创建开始菜单与桌面快捷方式、「添加或删除程序」卸载项（带图标），升级时原地替换旧版本。`installer\PORTABLE.txt` 与 MSI 的许可页都写清了它只装 exe、不装服务、不设自启。
+
+**便携包**：解压 `AllStore-0.11.0-windows-x64.zip` 直接双击 `AllStore.exe`，不写任何注册表；也可以运行包里的 `install.ps1` 补一个开始菜单入口（脚本还会顺手清掉旧 MindosShop 的快捷方式与卸载项）。
+
+程序不写注册表配置、不驻留服务、不设开机自启；状态只落在 `%LOCALAPPDATA%\AllStore\*.json`。exe 未做代码签名，首次运行若被 SmartScreen 拦截，点「更多信息 → 仍要运行」。
 
 ## 说明
 

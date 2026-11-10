@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  AllStore MSI installer (WiX v5 schema).
+
+  Per-user install, no admin prompt: everything lands in
+  %LOCALAPPDATA%\AllStore, shortcuts go to the current user's Start menu and
+  desktop, and Add/Remove Programs gets an entry with the app icon.
+
+  Build via tools\build_msi.ps1, which passes ProductVersion / SourceExe /
+  IconFile / LicenseRtf in as preprocessor variables.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Package Name="AllStore"
+           Manufacturer="AllStore contributors"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="CEB2D589-3523-4800-879E-C7398105E35F"
+           Scope="perUser"
+           Compressed="yes"
+           Codepage="65001"
+           InstallerVersion="500">
+
+    <SummaryInformation Description="AllStore — native Windows app store (per-user install)" />
+
+    <!-- Upgrades replace older versions in place, keeping the download queue
+         and caches under %LOCALAPPDATA%\AllStore untouched. -->
+    <MajorUpgrade DowngradeErrorMessage="已安装更新版本的 AllStore，安装程序将退出。"
+                  Schedule="afterInstallInitialize" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="AppIcon" SourceFile="$(var.IconFile)" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/XINKEJU/AllStore" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/XINKEJU/AllStore" />
+    <Property Id="ARPPUBLISHER" Value="AllStore contributors" />
+
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <ui:WixUI Id="WixUI_InstallDir" />
+
+    <!-- An upgrade must not fail on a running instance: offer to close it. -->
+    <util:CloseApplication Id="CloseRunningApp"
+                           Target="allstore.exe"
+                           Description="AllStore 正在运行，请关闭后继续安装。"
+                           CloseMessage="yes"
+                           PromptToContinue="yes"
+                           RebootPrompt="no" />
+
+    <Feature Id="Main" Title="AllStore" Level="1" AllowAbsent="no">
+      <ComponentGroupRef Id="AppFiles" />
+    </Feature>
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="INSTALLFOLDER" Name="AllStore" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="50071EAF-6838-45A5-8A91-552A179087A0">
+        <File Id="AllStoreExe"
+              Source="$(var.SourceExe)"
+              Name="allstore.exe">
+          <Shortcut Id="StartMenuShortcut"
+                    Directory="ProgramMenuFolder"
+                    Name="AllStore"
+                    Description="AllStore — 原生 Windows 软件商店"
+                    WorkingDirectory="INSTALLFOLDER" />
+          <Shortcut Id="DesktopShortcut"
+                    Directory="DesktopFolder"
+                    Name="AllStore"
+                    Description="AllStore — 原生 Windows 软件商店"
+                    WorkingDirectory="INSTALLFOLDER" />
+        </File>
+        <!-- Per-user components must key off HKCU, not the file (ICE38/ICE43). -->
+        <RegistryValue Id="InstallDirKey"
+                       Root="HKCU"
+                       Key="Software\AllStore"
+                       Name="InstallDir"
+                       Type="string"
+                       Value="[INSTALLFOLDER]"
+                       KeyPath="yes" />
+        <RemoveRegistryKey Id="RemoveInstallKey" Root="HKCU"
+                           Key="Software\AllStore" Action="removeOnUninstall" />
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+      </Component>
+    </ComponentGroup>
+  </Package>
+</Wix>

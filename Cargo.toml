@@ -1,9 +1,13 @@
 [package]
-name = "mindosshop"
-version = "0.10.0"
+name = "allstore"
+version = "0.11.0"
 edition = "2024"
-description = "A pure, lightweight native Windows app store client"
+description = "AllStore — a pure, lightweight native Windows app store client"
 license = "MIT"
+build = "build.rs"
+
+[build-dependencies]
+winresource = "0.1"
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }

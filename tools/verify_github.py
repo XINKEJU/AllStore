@@ -61,7 +61,7 @@ def via_api(repo, app):
     """One request, ~0.8 s, but the anonymous quota is 60/h."""
     req = urllib.request.Request(
         f"https://api.github.com/repos/{repo}/releases/latest",
-        headers={"User-Agent": "MindosShop", "Accept": "application/vnd.github+json"})
+        headers={"User-Agent": "AllStore", "Accept": "application/vnd.github+json"})
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             d = json.load(r)

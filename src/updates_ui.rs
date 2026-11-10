@@ -90,7 +90,7 @@ fn unique_path(dir: &str, stem: &str, ext: &str) -> String {
 /// a cancelled or killed transfer used to leave multi-MB `.part` files in the
 /// user's Downloads folder forever.
 fn temp_dir() -> std::path::PathBuf {
-    let p = std::env::temp_dir().join("MindosShop");
+    let p = std::env::temp_dir().join("AllStore");
     let _ = std::fs::create_dir_all(&p);
     p
 }
@@ -1073,7 +1073,7 @@ mod tests {
     #[ignore = "requires live network and writes a temporary file to Downloads"]
     fn live_download_writes_a_real_installer() {
         let url = format!("{}/dlservice/download?softid=L118939", crate::model::BASE);
-        let path = download_package("MindosShop-download-self-test", &url, 0)
+        let path = download_package("AllStore-download-self-test", &url, 0)
             .expect("installer download must succeed");
         let len = std::fs::metadata(&path).expect("file must exist").len();
         let mut f = File::open(&path).unwrap();
@@ -1102,7 +1102,7 @@ mod tests {
     #[ignore = "requires live network and writes temporary files"]
     fn live_resume_continues_from_partial_bytes() {
         let url = "https://webcdn.m.qq.com/spcmgr/download/znabc-5.23-1203.exe";
-        let name = "MindosShop-resume-self-test";
+        let name = "AllStore-resume-self-test";
         let part = part_path(name, url);
         let _ = std::fs::remove_file(&part);
         let cut = 300_000u64;
@@ -1122,7 +1122,7 @@ mod tests {
 
         let resumed = download_package_ex(name, url, 0, None, None, true)
             .expect("resume must complete the package");
-        let clean = download_package("MindosShop-resume-self-test-clean", url, 0)
+        let clean = download_package("AllStore-resume-self-test-clean", url, 0)
             .expect("clean download must succeed");
 
         let a = std::fs::read(&resumed).unwrap();

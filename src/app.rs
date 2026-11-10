@@ -170,10 +170,17 @@ pub struct AppState {
     /// Unfiltered result list backing `apps`; switching the source chip only
     /// re-filters this in memory, so no request is issued.
     pub catalog_all: Vec<App>,
+    /// The merged multi-source catalog, kept for the lifetime of the session.
+    /// Going back to "推荐" restores it instead of re-querying Lenovo, which
+    /// used to shrink the store to a single source after one category jump.
+    pub home: Vec<App>,
     /// `None` = every source, otherwise a source display name.
     pub source_filter: Option<String>,
     /// Source names present in the current list, in first-seen order.
     pub sources: Vec<String>,
+    /// Entries per source, parallel to `sources`. Shown on the chips so the
+    /// selector reports what each source actually contributed.
+    pub source_counts: Vec<usize>,
     pub list_title: String,
     pub search: Vec<u16>,
     pub focus_search: bool,
@@ -315,8 +322,10 @@ impl AppState {
             active_nav: 0,
             apps: Vec::new(),
             catalog_all: Vec::new(),
+            home: Vec::new(),
             source_filter: None,
             sources: Vec::new(),
+            source_counts: Vec::new(),
             list_title: "推荐应用".into(),
             search: Vec::new(),
             focus_search: false,
@@ -593,6 +602,10 @@ impl AppState {
                 sources.push(a.origin().to_string());
             }
         }
+        self.source_counts = sources
+            .iter()
+            .map(|s| self.catalog_all.iter().filter(|a| a.origin() == s).count())
+            .collect();
         self.sources = sources;
         // A Lenovo-only category cannot honour a "腾讯" filter: fall back to
         // "all sources" instead of showing an empty page.
@@ -662,7 +675,7 @@ impl AppState {
     /// Source chips live in the hero banner, replacing the decorative tagline.
     /// Fixed-width chips keep the hit-test independent of glyph metrics.
     fn source_chip_rects(&self, w: f32) -> Vec<(D2D_RECT_F, Option<String>)> {
-        source_chips(w, &self.sources)
+        source_chips(w, &self.sources, &self.source_counts)
     }
 
     pub(crate) fn invalidate(&self) {
@@ -748,6 +761,12 @@ impl AppState {
                 return;
             }
             NavKind::Browse => {}
+        }
+        // The landing page already holds every source in memory; re-requesting
+        // it would replace 736 rows with one Lenovo page.
+        if idx == 0 && !self.home.is_empty() {
+            self.set_apps(self.home.clone(), "推荐应用");
+            return;
         }
         let epoch = self.next_epoch();
         self.status = format!("正在加载「{}」…", item.label);
@@ -1452,8 +1471,9 @@ impl AppState {
             // Three non-overlapping columns: title/subtitle | stats | action.
             let btn = Self::hero_dl_rect(w);
             let stat_right = btn.left - 20.0;
-            let stat_left = stat_right - 150.0;
-            let text_right = stat_left - 20.0;
+            // Wide enough for "736 款应用 · 12 个分类 · 7 个可更新" on one line.
+            let stat_left = stat_right - 236.0;
+            let text_right = stat_left - 16.0;
             self.gfx.text(
                 &title,
                 gfx::rect(
@@ -1473,10 +1493,7 @@ impl AppState {
             let hover = self.hover;
             for (i, (r, src)) in chips.iter().enumerate() {
                 let active = *src == filter;
-                let label = match src {
-                    None => "全部源".to_string(),
-                    Some(s) => s.clone(),
-                };
+                let label = chip_label(&self.sources, &self.source_counts, i);
                 self.gfx
                     .round(*r, 9.0, if active { p.accent } else { p.bg });
                 if !active {
@@ -1507,21 +1524,17 @@ impl AppState {
                     p.sub,
                 );
             }
-            self.gfx.text(
-                &format!("{} 款应用", self.apps.len()),
-                gfx::rect(stat_left, hero.top + 16.0, stat_right, hero.top + 46.0),
-                15,
-                true,
-                p.accent,
-            );
+            // One stats line in the title band: the bottom band belongs to the
+            // source chips, which need the width far more than the numbers do.
             self.gfx.text(
                 &format!(
-                    "{} 个分类  ·  {} 个可更新",
+                    "{} 款应用  ·  {} 个分类  ·  {} 个可更新",
+                    self.apps.len(),
                     self.nav.len().saturating_sub(3),
                     self.updates.len()
                 ),
-                gfx::rect(stat_left, hero.top + 46.0, stat_right, hero.top + 70.0),
-                11,
+                gfx::rect(stat_left, hero.top + 14.0, stat_right, hero.top + 40.0),
+                12,
                 false,
                 p.sub,
             );
@@ -2371,6 +2384,7 @@ impl AppState {
                 ));
                 self.token = token;
                 self.load_nav(&classes);
+                self.home = apps.clone();
                 self.set_apps(apps, "推荐应用");
             }
             (WM_APP_DATA, Payload::Data(Err(e))) => {
@@ -2444,12 +2458,29 @@ pub(crate) fn in_rect(x: f32, y: f32, r: D2D_RECT_F) -> bool {
 /// Source filter chips ("全部源 / 联想 / 腾讯 / …") laid out inside the hero
 /// banner. Kept as a free function so the geometry is unit-testable without a
 /// window; the renderer and the hit-test both call it.
-pub(crate) fn source_chips(w: f32, sources: &[String]) -> Vec<(D2D_RECT_F, Option<String>)> {
+pub(crate) fn chip_label(sources: &[String], counts: &[usize], i: usize) -> String {
+    if i == 0 {
+        let total: usize = counts.iter().sum();
+        return format!("全部源 {}", total);
+    }
+    match sources.get(i - 1) {
+        Some(name) => {
+            let n = counts.get(i - 1).copied().unwrap_or(0);
+            format!("{} {}", name, n)
+        }
+        None => String::new(),
+    }
+}
+
+pub(crate) fn source_chips(
+    w: f32,
+    sources: &[String],
+    counts: &[usize],
+) -> Vec<(D2D_RECT_F, Option<String>)> {
     let hero = gfx::rect(NAV_W + PAD, TOP_H + 14.0, w - PAD, TOP_H + 14.0 + HERO_H);
     let btn = AppState::hero_dl_rect(w);
-    let stat_right = btn.left - 20.0;
-    let stat_left = stat_right - 150.0;
-    let right = stat_left - 20.0;
+    // The chips own the whole lower band: everything left of the button.
+    let right = btn.left - 16.0;
     let mut out = Vec::new();
     if right < hero.left + 120.0 {
         return out;
@@ -2460,17 +2491,23 @@ pub(crate) fn source_chips(w: f32, sources: &[String]) -> Vec<(D2D_RECT_F, Optio
     let y0 = hero.top + 48.0;
     let y1 = y0 + 26.0;
     let mut items: Vec<Option<String>> = vec![None];
-    items.extend(sources.iter().take(4).cloned().map(Some));
-    for it in items {
-        let label = match &it {
-            None => "全部源".to_string(),
-            Some(s) => s.clone(),
-        };
-        let cw = (label.chars().count() as f32 * 12.0 + 22.0).max(52.0);
+    items.extend(sources.iter().take(6).cloned().map(Some));
+    for (i, it) in items.iter().enumerate() {
+        // The chip carries its own count: "联想 341" tells the user what the
+        // filter is worth before they even click it.
+        let label = chip_label(sources, counts, i);
+        // Wide enough for 11 px bold text: CJK glyphs are ~1 em, ASCII ~0.6.
+        // Padding stays tight so three sources plus "全部源" fit even at the
+        // minimum window width.
+        let text_w: f32 = label
+            .chars()
+            .map(|c| if c.is_ascii() { 6.6 } else { 11.2 })
+            .sum();
+        let cw = (text_w + 20.0).max(56.0);
         if x + cw > right {
             break;
         }
-        out.push((gfx::rect(x, y0, x + cw, y1), it));
+        out.push((gfx::rect(x, y0, x + cw, y1), it.clone()));
         x += cw + 8.0;
     }
     out
@@ -2610,8 +2647,8 @@ mod tests {
         let hero = gfx::rect(NAV_W + PAD, TOP_H + 14.0, w - PAD, TOP_H + 14.0 + HERO_H);
         let btn = AppState::hero_dl_rect(w);
         let stat_right = btn.left - 20.0;
-        let stat_left = stat_right - 150.0;
-        let text_right = stat_left - 20.0;
+        let stat_left = stat_right - 236.0;
+        let text_right = stat_left - 16.0;
         assert!(hero.left + 24.0 < text_right);
         assert!(text_right < stat_left);
         assert!(stat_left < stat_right);
@@ -2623,6 +2660,18 @@ mod tests {
 
     fn banner_bottom_for_test(hero: D2D_RECT_F) -> f32 {
         hero.bottom
+    }
+
+    /// Every chip states how many rows it holds, so "全部源" and a single
+    /// source can never look like the same button.
+    #[test]
+    fn chips_report_their_own_counts() {
+        let sources = vec!["联想".to_string(), "腾讯".to_string()];
+        let counts = vec![341usize, 395];
+        assert_eq!(chip_label(&sources, &counts, 0), "全部源 736");
+        assert_eq!(chip_label(&sources, &counts, 1), "联想 341");
+        assert_eq!(chip_label(&sources, &counts, 2), "腾讯 395");
+        assert_eq!(chip_label(&sources, &counts, 3), "");
     }
 
     /// The source chips replaced the tagline; they must stay inside the hero,
@@ -2637,8 +2686,11 @@ mod tests {
         for w in [760.0f32, 900.0, 1100.0, 1600.0] {
             let hero = gfx::rect(NAV_W + PAD, TOP_H + 14.0, w - PAD, TOP_H + 14.0 + HERO_H);
             let btn = AppState::hero_dl_rect(w);
-            let text_right = btn.left - 20.0 - 150.0 - 20.0;
-            let chips = source_chips(w, &sources);
+            // Chips run all the way to the download button, so three typical
+            // sources must fit even at the minimum window width.
+            let text_right = btn.left - 16.0;
+            let counts = vec![341usize, 395, 12];
+            let chips = source_chips(w, &sources, &counts);
             if chips.is_empty() {
                 // Only acceptable when there is genuinely no room left.
                 assert!(text_right < hero.left + 120.0, "w={w}: chips dropped early");
@@ -2649,6 +2701,7 @@ mod tests {
                 hero.left + 24.0,
                 "w={w}: first chip offset"
             );
+            assert_eq!(chips.len(), 4, "w={w}: every source needs a chip");
             for (i, (r, _)) in chips.iter().enumerate() {
                 assert!(r.right > r.left, "w={w}: chip {i} has no width");
                 assert!(r.top > hero.top + 40.0, "w={w}: chip {i} hits the title");

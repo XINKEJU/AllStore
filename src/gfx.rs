@@ -339,14 +339,20 @@ impl Gfx {
     /// Insert an icon with a bounded LRU. Previously all 200 cached bitmaps
     /// were dropped at once, so scrolling re-downloaded every logo.
     pub fn put_icon(&mut self, key: String, bmp: ID2D1Bitmap) {
-        const LIMIT: usize = 160;
-        if self.icon_order.len() >= LIMIT {
-            let drop: Vec<String> = self.icon_order.drain(..40).collect();
-            for k in drop {
-                self.icons.remove(&k);
+        // A 40-icon window is smaller than one screen of cards plus the update
+        // list, so the cache used to evict icons that were still on screen and
+        // they reappeared as letter placeholders. Keep several pages instead,
+        // and never queue the same key twice (duplicates evicted live icons).
+        const LIMIT: usize = 400;
+        if !self.icons.contains_key(&key) {
+            if self.icon_order.len() >= LIMIT {
+                let drop: Vec<String> = self.icon_order.drain(..80).collect();
+                for k in drop {
+                    self.icons.remove(&k);
+                }
             }
+            self.icon_order.push(key.clone());
         }
-        self.icon_order.push(key.clone());
         self.icons.insert(key, bmp);
     }
 

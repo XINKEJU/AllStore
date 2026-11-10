@@ -140,12 +140,51 @@ pub fn catalog(token: &str, progress: &mut dyn FnMut(usize, usize)) -> Catalog {
         progress(done, total);
     }
 
-    let merged = dedup(out);
+    // Concatenating the sources keeps Lenovo's 300+ rows in front, which makes
+    // "全部源" look identical to "联想" on the first screen. Round-robin the
+    // sources instead so the mixed list is visibly mixed.
+    let merged = interleave(dedup(out));
     Catalog {
         apps: merged,
         sources,
         warnings,
     }
+}
+
+/// Round-robin one entry per source at a time, preserving each source's own
+/// order. Sources are taken in first-seen order, so the flagship rows of every
+/// source land on the first screen of the merged list.
+pub fn interleave(list: Vec<App>) -> Vec<App> {
+    let mut order: Vec<String> = Vec::new();
+    for a in &list {
+        let src = a.origin().to_string();
+        if !order.contains(&src) {
+            order.push(src);
+        }
+    }
+    if order.len() < 2 {
+        return list;
+    }
+    let mut buckets: Vec<std::collections::VecDeque<App>> = order
+        .iter()
+        .map(|_| std::collections::VecDeque::new())
+        .collect();
+    for a in list {
+        let idx = order
+            .iter()
+            .position(|s| s == a.origin())
+            .unwrap_or_default();
+        buckets[idx].push_back(a);
+    }
+    let mut out = Vec::new();
+    while buckets.iter().any(|b| !b.is_empty()) {
+        for b in buckets.iter_mut() {
+            if let Some(a) = b.pop_front() {
+                out.push(a);
+            }
+        }
+    }
+    out
 }
 
 /// One product can appear in several categories (and in several sources).
@@ -379,6 +418,42 @@ mod tests {
             dl_a: Some(url.into()),
             ..Default::default()
         }
+    }
+
+    fn sourced(name: &str, source: &str) -> App {
+        App {
+            id: format!("{}{}", source, name),
+            name: name.into(),
+            dl_a: Some(format!("https://e/{}.exe", name)),
+            source: Some(source.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn interleave_mixes_sources_without_dropping_any() {
+        let list = vec![
+            sourced("联想A", "联想"),
+            sourced("联想B", "联想"),
+            sourced("联想C", "联想"),
+            sourced("腾讯A", "腾讯"),
+            sourced("腾讯B", "腾讯"),
+        ];
+        let out = interleave(list);
+        let names: Vec<&str> = out.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["联想A", "腾讯A", "联想B", "腾讯B", "联想C"],
+            "one entry per source per round, order inside a source preserved"
+        );
+    }
+
+    #[test]
+    fn single_source_list_is_left_untouched() {
+        let list = vec![sourced("A", "联想"), sourced("B", "联想")];
+        let out = interleave(list);
+        assert_eq!(out[0].name, "A");
+        assert_eq!(out[1].name, "B");
     }
 
     #[test]

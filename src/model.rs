@@ -103,7 +103,7 @@ impl App {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClassItem {
     #[serde(rename = "classId", default)]
     pub id: String,
@@ -111,7 +111,7 @@ pub struct ClassItem {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClassGroup {
     #[serde(default)]
     pub code: String,

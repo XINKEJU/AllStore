@@ -4,6 +4,7 @@
 //! Single executable, one process, no runtime, no browser, no telemetry.
 
 mod app;
+mod catcache;
 mod downloads;
 mod gfx;
 mod installed;

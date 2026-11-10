@@ -5,6 +5,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::ffi::c_void;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,7 @@ use windows::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient, ValidateRect
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::catcache;
 use crate::downloads::{self, DlState, DlTask};
 use crate::gfx::{self, Gfx, Palette};
 use crate::installed::{InstalledApp, Inventory};
@@ -35,6 +37,11 @@ pub const WM_APP_DL_DONE: u32 = 0x8000 + 10;
 pub const WM_APP_FALLBACK: u32 = 0x8000 + 12;
 /// Single 500 ms clock for caret blink and speed-graph sampling.
 pub const TIMER_ID: usize = 1;
+
+/// Set once the cached catalog is on screen. `start_load` reads it to word
+/// its progress line ("后台刷新" instead of "正在聚合"), which is the truth
+/// when the user is already looking at real cards.
+static CACHE_WARM: AtomicBool = AtomicBool::new(false);
 
 // Design tokens: one grid for every screen.
 pub(crate) const NAV_W: f32 = 200.0;
@@ -377,6 +384,18 @@ impl AppState {
         // One registry walk at start-up feeds both the update badge and the
         // "installed" badges on every store card. No I/O happens while painting.
         state.refresh_updates_local();
+        // Paint the previous session's catalog immediately; the background
+        // refresh started by `start_load` swaps in fresh rows when it lands.
+        if let Some(c) = catcache::load() {
+            let age = catcache::age_text(c.saved_at);
+            let n = c.apps.len();
+            state.update_catalog = c.apps.clone();
+            state.home = c.apps.clone();
+            state.load_nav(&c.classes);
+            state.set_apps(c.apps, "推荐应用");
+            state.status = format!("本地缓存（{}）· 共 {} 款应用 · 正在后台刷新…", age, n);
+            CACHE_WARM.store(true, Ordering::Relaxed);
+        }
         state
     }
 
@@ -2408,18 +2427,38 @@ impl AppState {
                     classes.len(),
                     apps.len()
                 ));
+                let n = apps.len();
                 self.token = token;
                 self.load_nav(&classes);
                 // The catalog already probed and repaired every third-party
                 // link on its worker thread, so what arrives here is usable
                 // as-is (and still round-robin mixed).
+                self.update_catalog = apps.clone();
                 self.home = apps.clone();
-                self.set_apps(apps, "推荐应用");
+                // On a warm start the cache is already on screen and the user
+                // may have moved on to a category, a search or a detail page.
+                // Their view wins: only the landing page is replaced in place,
+                // everything else just gets the fresher catalog underneath.
+                let on_home =
+                    self.active_nav == 0 && self.mode == Mode::Browse && self.search.is_empty();
+                if on_home {
+                    self.set_apps(apps, "推荐应用");
+                } else {
+                    self.recompute_sources();
+                    self.status = format!("目录已刷新 · 共 {} 款应用", n);
+                    self.invalidate();
+                }
             }
             (WM_APP_DATA, Payload::Data(Err(e))) => {
                 net::log(&format!("DATA err {}", e));
                 self.loading = false;
-                self.status = format!("连接失败：{}（检查网络后重启）", e);
+                // With a cached catalog on screen a refresh failure is a
+                // footnote, not a dead store: keep the rows, say what happened.
+                self.status = if self.catalog_all.is_empty() {
+                    format!("连接失败：{}（检查网络后重启）", e)
+                } else {
+                    format!("后台刷新失败（{}），正在显示本地缓存目录", e)
+                };
                 self.invalidate();
             }
             (WM_APP_FALLBACK, Payload::Fallback { id, url }) => {
@@ -2547,6 +2586,7 @@ pub(crate) fn source_chips(
 
 /// Kick off the initial network load on a worker thread.
 pub fn start_load(hwnd_usize: usize) {
+    let warm = CACHE_WARM.load(Ordering::Relaxed);
     std::thread::spawn(move || {
         let result = (|| -> Result<(String, Vec<ClassGroup>, Vec<App>), String> {
             let token = net::register()?;
@@ -2554,10 +2594,11 @@ pub fn start_load(hwnd_usize: usize) {
             // One merged list from every enabled source; the sidebar still
             // navigates Lenovo categories, the landing page shows everything.
             let mut progress = |d: usize, t: usize| {
+                let verb = if warm { "后台刷新" } else { "正在聚合" };
                 post(
                     hwnd_usize,
                     WM_APP_STATUS,
-                    Payload::Status(format!("正在聚合软件源 {}/{}…", d, t)),
+                    Payload::Status(format!("{}软件源 {}/{}…", verb, d, t)),
                 );
             };
             let mut note = |text: &str| {
@@ -2571,6 +2612,9 @@ pub fn start_load(hwnd_usize: usize) {
                     merged.warnings.join("；")
                 });
             }
+            // Persist before posting: the next cold start paints this snapshot
+            // instead of a spinner. Worker-thread I/O keeps the UI thread free.
+            catcache::save(&classes, &merged.apps);
             Ok((token, classes, merged.apps))
         })();
         post(hwnd_usize, WM_APP_DATA, Payload::Data(result));

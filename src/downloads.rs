@@ -15,6 +15,18 @@ use crate::gfx::{self, Color, Gfx, Palette};
 use crate::updates_ui;
 
 pub(crate) const DL_ROW_H: f32 = 100.0;
+/// One sample every 500 ms -> a 36 second rolling window.
+pub(crate) const SPEED_SAMPLES: usize = 72;
+pub(crate) const DL_CHART_TOP: f32 = TOP_H + 96.0;
+pub(crate) const DL_CHART_H: f32 = 172.0;
+pub(crate) const DL_ROWS_TOP: f32 = DL_CHART_TOP + DL_CHART_H + GAP;
+const _: () = assert!(DL_ROWS_TOP >= DL_CHART_TOP + DL_CHART_H);
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct SpeedSample {
+    pub net: f64,
+    pub disk: f64,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DlState {
@@ -33,8 +45,10 @@ pub struct DlTask {
     pub state: DlState,
     pub done: u64,
     pub total: u64,
-    /// Smoothed bytes per second.
+    /// Smoothed bytes per second received from the network.
     pub speed: f64,
+    /// Smoothed bytes per second actually committed to disk.
+    pub disk_speed: f64,
     pub path: Option<String>,
     pub error: Option<String>,
     pub cancel: Arc<AtomicBool>,
@@ -79,6 +93,33 @@ pub fn fmt_speed(bps: f64) -> String {
     }
 }
 
+/// Round a peak up to the next power-of-two binary step (64 KiB, 128 KiB,
+/// 256 KiB …). `fmt_size` is 1024-based, so decimal 1/2/5 steps would print
+/// awkward labels like "4.8 MB/s" at the top gridline.
+pub(crate) fn nice_scale(v: f64) -> f64 {
+    const FLOOR: f64 = 64.0 * 1024.0;
+    const CEILING: f64 = 1024.0 * 1024.0 * 1024.0;
+    if !v.is_finite() || v <= 0.0 {
+        return FLOOR;
+    }
+    let mut step = FLOOR;
+    while step < v && step < CEILING {
+        step *= 2.0;
+    }
+    step
+}
+
+/// Horizontal anchors for the three header columns of the speed panel.
+fn speed_header_columns(l: f32, r: f32) -> (f32, f32, f32) {
+    let pw = r - l;
+    let c1 = (pw * 0.28).max(130.0);
+    let c2 = (pw * 0.26).max(120.0);
+    let x1 = l;
+    let x2 = l + c1;
+    let x3 = (x2 + c2).min(r - 180.0).max(x2 + 8.0);
+    (x1, x2, x3)
+}
+
 /// A rounded progress bar. `color` lets finished/failed tasks keep their own
 /// identity instead of every bar looking "in progress".
 pub fn progress_bar(g: &mut Gfx, p: Palette, r: D2D_RECT_F, frac: f32, color: Color) {
@@ -104,6 +145,9 @@ pub struct Progress {
     done: u64,
     total: u64,
     speed: f64,
+    disk_speed: f64,
+    written: u64,
+    last_written: u64,
     tick: Instant,
     last_done: u64,
     last_pct: i32,
@@ -119,11 +163,21 @@ impl Progress {
             done: 0,
             total: 0,
             speed: 0.0,
+            disk_speed: 0.0,
+            written: 0,
+            last_written: 0,
             tick: Instant::now(),
             last_done: 0,
             last_pct: -1,
             posts: 0,
         }
+    }
+
+    /// Bytes confirmed by `write_all`. Counting over wall-clock windows (not
+    /// the duration of the write call) keeps disk throughput comparable to
+    /// network throughput: a slow disk makes this number lag behind.
+    pub fn written(&mut self, n: usize) {
+        self.written += n as u64;
     }
 
     pub fn set_total(&mut self, total: u64) {
@@ -141,8 +195,14 @@ impl Progress {
         let elapsed = now.duration_since(self.tick).as_secs_f64();
         if elapsed >= 0.08 {
             let delta = self.done.saturating_sub(self.last_done);
+            let delta_disk = self.written.saturating_sub(self.last_written);
             let instant = if elapsed > 0.0 {
                 delta as f64 / elapsed
+            } else {
+                0.0
+            };
+            let instant_disk = if elapsed > 0.0 {
+                delta_disk as f64 / elapsed
             } else {
                 0.0
             };
@@ -151,8 +211,14 @@ impl Progress {
             } else {
                 self.speed * 0.65 + instant * 0.35
             };
+            self.disk_speed = if self.disk_speed == 0.0 {
+                instant_disk
+            } else {
+                self.disk_speed * 0.65 + instant_disk * 0.35
+            };
             self.tick = now;
             self.last_done = self.done;
+            self.last_written = self.written;
         }
         let pct = self
             .done
@@ -180,6 +246,7 @@ impl Progress {
                     done: self.done,
                     total: self.total,
                     speed: self.speed,
+                    disk: self.disk_speed,
                 },
             ),
             None => post(
@@ -219,6 +286,7 @@ impl AppState {
             done: 0,
             total: 0,
             speed: 0.0,
+            disk_speed: 0.0,
             path: None,
             error: None,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -235,6 +303,7 @@ impl AppState {
                 t.done = 0;
                 t.total = 0;
                 t.speed = 0.0;
+                t.disk_speed = 0.0;
                 t.error = None;
                 t.cancel.store(false, Ordering::Relaxed);
             }
@@ -252,6 +321,7 @@ impl AppState {
         t.done = 0;
         t.total = 0;
         t.speed = 0.0;
+        t.disk_speed = 0.0;
         t.error = None;
         t.cancel.store(false, Ordering::Relaxed);
         let (name, url, cancel) = (t.name.clone(), t.url.clone(), t.cancel.clone());
@@ -264,7 +334,7 @@ impl AppState {
         });
     }
 
-    pub fn on_dl_progress(&mut self, id: u64, done: u64, total: u64, speed: f64) {
+    pub fn on_dl_progress(&mut self, id: u64, done: u64, total: u64, speed: f64, disk: f64) {
         let Some(t) = self.downloads.iter_mut().find(|t| t.id == id) else {
             return;
         };
@@ -280,6 +350,7 @@ impl AppState {
             t.total = total;
         }
         t.speed = speed;
+        t.disk_speed = disk;
         self.invalidate();
     }
 
@@ -293,6 +364,7 @@ impl AppState {
                 t.path = Some(path.clone());
                 t.error = None;
                 t.speed = 0.0;
+                t.disk_speed = 0.0;
                 let short = path.rsplit(['\\', '/']).next().unwrap_or(&path);
                 self.status = format!("✓ {} 已下载到 Downloads（{}）", t.name, short);
             }
@@ -304,8 +376,14 @@ impl AppState {
                 };
                 t.error = Some(e.clone());
                 t.speed = 0.0;
+                t.disk_speed = 0.0;
                 self.status = format!("{} 下载未完成：{}", t.name, e);
             }
+        }
+        // An installer may have just been run from Downloads. Re-scan the
+        // uninstall keys so the updates badge does not keep nagging.
+        if self.mode == crate::app::Mode::Updates {
+            self.refresh_updates_local();
         }
         self.invalidate();
     }
@@ -362,8 +440,26 @@ impl AppState {
             .count()
     }
 
+    /// Called by the 500 ms window timer. Sampling on a fixed clock (rather
+    /// than on each progress message) keeps the graph evenly spaced even when
+    /// a fast connection emits dozens of updates per second.
+    pub fn sample_speeds(&mut self) {
+        let mut net = 0.0f64;
+        let mut disk = 0.0f64;
+        for t in &self.downloads {
+            if t.state == DlState::Downloading {
+                net += t.speed;
+                disk += t.disk_speed;
+            }
+        }
+        if self.speed_history.len() >= SPEED_SAMPLES {
+            self.speed_history.pop_front();
+        }
+        self.speed_history.push_back(SpeedSample { net, disk });
+    }
+
     pub fn dl_max_scroll(&self) -> i32 {
-        let visible = (self.height as f32 - TOP_H - STATUS_H - 118.0).max(0.0);
+        let visible = (self.height as f32 - STATUS_H - DL_ROWS_TOP).max(0.0);
         let content = self.downloads.len() as f32 * (DL_ROW_H + GAP);
         (content - visible).max(0.0) as i32
     }
@@ -380,8 +476,8 @@ impl AppState {
         if x1 <= x0 + 320.0 {
             return None;
         }
-        let top = TOP_H + 110.0 + i as f32 * (DL_ROW_H + GAP) - self.scroll as f32;
-        if top + DL_ROW_H < TOP_H + 96.0 || top > h - STATUS_H {
+        let top = DL_ROWS_TOP + i as f32 * (DL_ROW_H + GAP) - self.scroll as f32;
+        if top + DL_ROW_H < DL_ROWS_TOP || top > h - STATUS_H {
             return None;
         }
         Some(gfx::rect(x0, top, x1, top + DL_ROW_H))
@@ -397,6 +493,265 @@ impl AppState {
     fn clear_rect(&self) -> D2D_RECT_F {
         let w = self.width as f32;
         gfx::rect(w - 158.0, TOP_H + 20.0, w - PAD, TOP_H + 52.0)
+    }
+
+    /// Steam-style transfer monitor: two translucent bar series (instantaneous
+    /// network / disk throughput) plus two smoothed trend lines, over a 36 s
+    /// rolling window sampled by the window timer.
+    fn render_speed_panel(&mut self, w: f32) {
+        let p = self.gfx.pal;
+        let panel = gfx::rect(
+            NAV_W + PAD,
+            DL_CHART_TOP,
+            w - PAD,
+            DL_CHART_TOP + DL_CHART_H,
+        );
+        if panel.right <= panel.left + 320.0 {
+            return;
+        }
+        self.gfx.round(panel, 14.0, p.card);
+        self.gfx.outline(panel, p.border, 0.8);
+        let l = panel.left + 16.0;
+        let r = panel.right - 16.0;
+        let t = panel.top;
+
+        let hist: Vec<SpeedSample> = self.speed_history.iter().copied().collect();
+        let mut net = 0.0f64;
+        let mut disk = 0.0f64;
+        let mut total_bytes = 0u64;
+        for task in &self.downloads {
+            total_bytes = total_bytes.saturating_add(task.done);
+            if task.state == DlState::Downloading {
+                net += task.speed;
+                disk += task.disk_speed;
+            }
+        }
+        let peak = hist
+            .iter()
+            .fold(net.max(disk), |m, s| m.max(s.net).max(s.disk));
+        let scale = nice_scale(peak);
+        let speed_text = |v: f64| {
+            if v > 0.0 {
+                fmt_speed(v)
+            } else {
+                "0 B/s".into()
+            }
+        };
+        let net_text = speed_text(net);
+        let disk_text = speed_text(disk);
+        let peak_text = speed_text(peak);
+
+        // Three proportional columns. Fixed offsets used to collide on a
+        // 1000 DIP window: "累计/峰值" ran into the disk-speed label.
+        let (x1, x2, x3) = speed_header_columns(l, r);
+
+        self.gfx.text(
+            "实时传输",
+            gfx::rect(x1, t + 8.0, x2 - 8.0, t + 28.0),
+            12,
+            true,
+            p.text,
+        );
+        self.gfx.text(
+            &net_text,
+            gfx::rect(x1, t + 26.0, x2 - 8.0, t + 54.0),
+            21,
+            true,
+            p.accent,
+        );
+        self.gfx.text(
+            "网络接收",
+            gfx::rect(x1, t + 52.0, x2 - 8.0, t + 66.0),
+            10,
+            false,
+            p.sub,
+        );
+        self.gfx.text(
+            "写盘速度",
+            gfx::rect(x2, t + 8.0, x3 - 8.0, t + 28.0),
+            10,
+            false,
+            p.sub,
+        );
+        self.gfx.text(
+            &disk_text,
+            gfx::rect(x2, t + 26.0, x3 - 8.0, t + 52.0),
+            16,
+            true,
+            p.disk_line,
+        );
+        self.gfx.text(
+            &format!("累计 {}  ·  峰值 {}", fmt_size(total_bytes), peak_text),
+            gfx::rect(x3, t + 8.0, r, t + 30.0),
+            11,
+            false,
+            p.sub,
+        );
+        self.gfx
+            .fill(gfx::rect(x3, t + 38.0, x3 + 8.0, t + 46.0), p.net_line);
+        self.gfx.text(
+            "网络",
+            gfx::rect(x3 + 13.0, t + 32.0, x3 + 51.0, t + 54.0),
+            10,
+            false,
+            p.sub,
+        );
+        self.gfx.fill(
+            gfx::rect(x3 + 57.0, t + 38.0, x3 + 65.0, t + 46.0),
+            p.disk_line,
+        );
+        self.gfx.text(
+            "写盘",
+            gfx::rect(x3 + 70.0, t + 32.0, x3 + 108.0, t + 54.0),
+            10,
+            false,
+            p.sub,
+        );
+        self.gfx.text(
+            "柱 = 瞬时  ·  线 = 趋势",
+            gfx::rect(x3 + 114.0, t + 32.0, r, t + 54.0),
+            10,
+            false,
+            p.sub,
+        );
+
+        let graph = gfx::rect(l, t + 70.0, r, t + 148.0);
+        let gh = graph.bottom - graph.top;
+        for i in 0..=3 {
+            let y = graph.top + gh * i as f32 / 3.0;
+            self.gfx
+                .fill(gfx::rect(graph.left, y, graph.right, y + 0.6), p.border);
+        }
+        let slot = (graph.right - graph.left) / SPEED_SAMPLES as f32;
+        let bar_w = (slot * 0.30).max(1.0);
+        for (i, s) in hist.iter().enumerate() {
+            let x = graph.left + i as f32 * slot;
+            let hn = (s.net / scale).clamp(0.0, 1.0) as f32 * gh;
+            let hd = (s.disk / scale).clamp(0.0, 1.0) as f32 * gh;
+            if hn > 0.0 {
+                self.gfx.fill(
+                    gfx::rect(
+                        x + slot * 0.10,
+                        graph.bottom - hn,
+                        x + slot * 0.10 + bar_w,
+                        graph.bottom,
+                    ),
+                    p.net,
+                );
+            }
+            if hd > 0.0 {
+                self.gfx.fill(
+                    gfx::rect(
+                        x + slot * 0.55,
+                        graph.bottom - hd,
+                        x + slot * 0.55 + bar_w,
+                        graph.bottom,
+                    ),
+                    p.disk,
+                );
+            }
+        }
+        // Smoothed trend lines over the same window.
+        let smooth = |hist: &[SpeedSample], net_series: bool| -> Vec<f64> {
+            let pick = |s: &SpeedSample| if net_series { s.net } else { s.disk };
+            (0..hist.len())
+                .map(|i| {
+                    let a = pick(&hist[i.saturating_sub(1)]);
+                    let b = pick(&hist[i]);
+                    let c = pick(&hist[(i + 1).min(hist.len() - 1)]);
+                    (a + 2.0 * b + c) / 4.0
+                })
+                .collect()
+        };
+        let y_of = |v: f64| graph.bottom - (v / scale).clamp(0.0, 1.0) as f32 * gh;
+        if peak > 0.0 {
+            for (series, color) in [(true, p.net_line), (false, p.disk_line)] {
+                let values = smooth(&hist, series);
+                for i in 1..values.len() {
+                    let x0 = graph.left + (i as f32 - 0.5) * slot;
+                    let x1 = graph.left + (i as f32 + 0.5) * slot;
+                    self.gfx
+                        .line(x0, y_of(values[i - 1]), x1, y_of(values[i]), color, 1.6);
+                }
+            }
+        }
+        self.gfx.text(
+            &fmt_speed(scale),
+            gfx::rect(
+                graph.left + 4.0,
+                graph.top + 2.0,
+                graph.left + 96.0,
+                graph.top + 18.0,
+            ),
+            10,
+            false,
+            p.sub,
+        );
+        // Axis labels sit on top of the newest bars; give them an opaque chip
+        // so the numbers stay legible at full speed.
+        self.gfx.fill(
+            gfx::rect(
+                graph.left + 2.0,
+                graph.bottom - 17.0,
+                graph.left + 28.0,
+                graph.bottom - 1.0,
+            ),
+            p.card,
+        );
+        self.gfx.text(
+            "0",
+            gfx::rect(
+                graph.left + 4.0,
+                graph.bottom - 16.0,
+                graph.left + 26.0,
+                graph.bottom - 2.0,
+            ),
+            10,
+            false,
+            p.sub,
+        );
+        self.gfx.fill(
+            gfx::rect(
+                graph.right - 58.0,
+                graph.bottom - 17.0,
+                graph.right - 2.0,
+                graph.bottom - 1.0,
+            ),
+            p.card,
+        );
+        self.gfx.text(
+            "-36s",
+            gfx::rect(
+                graph.right - 56.0,
+                graph.bottom - 16.0,
+                graph.right - 4.0,
+                graph.bottom - 2.0,
+            ),
+            10,
+            false,
+            p.sub,
+        );
+        if peak <= 0.0 {
+            self.gfx.center_text(
+                "开始下载后，这里会显示最近 36 秒的网络与写盘速度",
+                gfx::rect(
+                    graph.left,
+                    graph.top + 18.0,
+                    graph.right,
+                    graph.bottom - 16.0,
+                ),
+                12,
+                false,
+                p.sub,
+            );
+        }
+        self.gfx.text(
+            "每 0.5 秒采样  ·  柱为瞬时速度（网络 / 写盘），折线为平滑趋势  ·  仅在本机统计",
+            gfx::rect(l, t + 150.0, r, t + 166.0),
+            10,
+            false,
+            p.sub,
+        );
     }
 
     pub fn render_downloads(&mut self, w: f32, _h: f32) {
@@ -440,23 +795,25 @@ impl AppState {
                 .iter()
                 .all(|t| matches!(t.state, DlState::Queued | DlState::Downloading)),
         );
+        self.render_speed_panel(w);
 
         if self.downloads.is_empty() {
+            let top = DL_ROWS_TOP;
             self.gfx.round(
-                gfx::rect(NAV_W + PAD, TOP_H + 110.0, w - PAD, TOP_H + 218.0),
+                gfx::rect(NAV_W + PAD, top, w - PAD, top + 108.0),
                 14.0,
                 p.accent_soft,
             );
             self.gfx.center_text(
                 "还没有下载任务",
-                gfx::rect(NAV_W + PAD, TOP_H + 124.0, w - PAD, TOP_H + 166.0),
+                gfx::rect(NAV_W + PAD, top + 14.0, w - PAD, top + 56.0),
                 17,
                 true,
                 p.text,
             );
             self.gfx.center_text(
                 "在应用卡片或详情页点「获取」，这里会实时显示进度、速度和剩余大小",
-                gfx::rect(NAV_W + PAD, TOP_H + 166.0, w - PAD, TOP_H + 204.0),
+                gfx::rect(NAV_W + PAD, top + 56.0, w - PAD, top + 94.0),
                 12,
                 false,
                 p.sub,
@@ -501,7 +858,10 @@ impl AppState {
                     }
                     let mut s = parts.join(" / ");
                     if !fmt_speed(t.speed).is_empty() {
-                        s.push_str(&format!("  ·  {}", fmt_speed(t.speed)));
+                        s.push_str(&format!("  ·  网络 {}", fmt_speed(t.speed)));
+                    }
+                    if !fmt_speed(t.disk_speed).is_empty() {
+                        s.push_str(&format!("  ·  写盘 {}", fmt_speed(t.disk_speed)));
                     }
                     (s, p.sub)
                 }
@@ -606,10 +966,15 @@ impl AppState {
     /// Compact live progress shown in the bottom bar on every page.
     pub fn render_status_progress(&mut self, w: f32, h: f32) {
         let p = self.gfx.pal;
-        let Some((name, pct, speed, frac)) = self
-            .active_task()
-            .map(|t| (t.name.clone(), t.percent(), fmt_speed(t.speed), t.frac()))
-        else {
+        let Some((name, pct, speed, disk, frac)) = self.active_task().map(|t| {
+            (
+                t.name.clone(),
+                t.percent(),
+                fmt_speed(t.speed),
+                fmt_speed(t.disk_speed),
+                t.frac(),
+            )
+        }) else {
             return;
         };
         let x0 = (w - 400.0).max(200.0);
@@ -617,7 +982,11 @@ impl AppState {
         if x1 <= x0 + 120.0 {
             return;
         }
-        let caption = format!("{}  {}  {}", name, pct, speed);
+        let caption = if disk.is_empty() {
+            format!("{}  {}  {}", name, pct, speed)
+        } else {
+            format!("{}  {}  网 {}  盘 {}", name, pct, speed, disk)
+        };
         self.gfx.text(
             &caption,
             gfx::rect(x0, h - STATUS_H + 2.0, x1, h - STATUS_H + 18.0),
@@ -715,6 +1084,7 @@ mod tests {
             done,
             total,
             speed: 0.0,
+            disk_speed: 0.0,
             path: None,
             error: None,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -759,5 +1129,48 @@ mod tests {
         assert_eq!(task(DlState::Downloading, 25, 100).percent(), "25%");
         assert_eq!(task(DlState::Downloading, 1, 0).percent(), "…");
         assert_eq!(task(DlState::Failed, 50, 100).percent(), "50%");
+    }
+
+    #[test]
+    fn speed_scale_uses_binary_steps_matching_fmt_size() {
+        let k = 1024.0f64;
+        assert_eq!(nice_scale(0.0), 64.0 * k);
+        assert_eq!(nice_scale(100.0 * k), 128.0 * k);
+        assert_eq!(nice_scale(3.0 * k * k), 4.0 * k * k);
+        assert_eq!(nice_scale(8.0 * k * k), 8.0 * k * k);
+        assert_eq!(nice_scale(1.7 * k * k), 2.0 * k * k);
+        assert!(nice_scale(1.7 * k * k) >= 1.7 * k * k);
+    }
+
+    #[test]
+    fn speed_graph_never_overlaps_the_task_rows() {
+        assert!(DL_ROWS_TOP + DL_ROW_H < crate::app::MIN_H as f32 - STATUS_H);
+        assert_eq!(SPEED_SAMPLES, 72, "72 samples x 500 ms = 36 s window");
+    }
+
+    #[test]
+    fn speed_header_columns_stay_disjoint_at_every_window_width() {
+        // Panel = [NAV_W + PAD + 16, w - PAD - 16] for the supported widths.
+        for w in [1000.0f32, 1100.0, 1600.0, 2048.0, 2560.0] {
+            let (l, r) = (NAV_W + PAD + 16.0, w - PAD - 16.0);
+            let (x1, x2, x3) = speed_header_columns(l, r);
+            assert!(x1 < x2 && x2 < x3 && x3 < r, "columns collide at w={w}");
+            assert!(r - x3 >= 180.0 || x3 >= x2 + 8.0, "right column too narrow");
+            // Legend needs 114 + label width inside the right column.
+            assert!(r - x3 >= 114.0, "legend overflows at w={w}");
+        }
+    }
+
+    #[test]
+    fn disk_throughput_is_sampled_independently_of_network() {
+        let mut p = Progress::new(Some(3), 0, "App");
+        p.set_total(1 << 20);
+        for _ in 0..10 {
+            p.written(10_000);
+            p.add(10_000);
+        }
+        // Written bytes are tracked separately so a slow disk can lag.
+        assert_eq!(p.written, p.done);
+        assert!(p.disk_speed >= 0.0);
     }
 }

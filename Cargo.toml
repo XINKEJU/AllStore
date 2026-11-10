@@ -1,6 +1,6 @@
 [package]
 name = "mindosshop"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 description = "A pure, lightweight native Windows app store client"
 license = "MIT"
@@ -22,6 +22,8 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Dwm",
     "Win32_Networking_WinHttp",
     "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
     "Win32_System_Registry",
     "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",

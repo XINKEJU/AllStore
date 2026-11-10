@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
-use windows::Win32::Graphics::Gdi::{InvalidateRect, ValidateRect};
+use windows::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient, ValidateRect};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::downloads::{self, DlState, DlTask};
@@ -27,6 +28,8 @@ pub const WM_APP_UPDATE_PROGRESS: u32 = 0x8000 + 7;
 pub const WM_APP_UPDATE_DONE: u32 = 0x8000 + 8;
 pub const WM_APP_DL_PROGRESS: u32 = 0x8000 + 9;
 pub const WM_APP_DL_DONE: u32 = 0x8000 + 10;
+/// Single 500 ms clock for caret blink and speed-graph sampling.
+pub const TIMER_ID: usize = 1;
 
 // Design tokens: one grid for every screen.
 pub(crate) const NAV_W: f32 = 200.0;
@@ -88,13 +91,14 @@ pub enum Payload {
         done: u64,
         total: u64,
         speed: f64,
+        disk: f64,
     },
     DlDone {
         id: u64,
         result: Result<String, String>,
     },
     UpdateProgress(usize, usize),
-    UpdateDone(Result<Vec<UpdateItem>, String>),
+    UpdateDone(Result<update::CheckResult, String>),
 }
 
 pub(crate) fn post(hwnd_usize: usize, msg: u32, p: Payload) {
@@ -144,6 +148,15 @@ pub struct AppState {
     pub list_title: String,
     pub search: Vec<u16>,
     pub focus_search: bool,
+    /// UTF-16 index of the insertion point (not simply "end of string").
+    pub search_caret: usize,
+    /// Ctrl+A selection; the next keystroke replaces the whole query.
+    pub search_select_all: bool,
+    /// Blinking caret phase, driven by the 500 ms window timer.
+    pub caret_on: bool,
+    /// WM_CHAR delivers UTF-16 code units one at a time; hold a high surrogate
+    /// until its pair arrives so emoji / rare CJK are not turned into U+FFFD.
+    high_surrogate: Option<u16>,
     pub mode: Mode,
     pub detail_index: usize,
     pub detail_extra: Option<Detail>,
@@ -153,6 +166,9 @@ pub struct AppState {
     pub status: String,
     pub loading: bool,
     pub updates: Vec<UpdateItem>,
+    /// Catalog snapshot from the last full check, used for instant local
+    /// re-scans after the user installs an update.
+    pub update_catalog: Vec<App>,
     pub update_checking: bool,
     pub update_progress: (usize, usize),
     pub update_checked_at: u64,
@@ -160,6 +176,8 @@ pub struct AppState {
     /// Download centre tasks; the single source of truth for every progress UI.
     pub downloads: Vec<DlTask>,
     pub next_dl_id: u64,
+    /// Rolling 36-second transfer history for the Steam-style speed graph.
+    pub speed_history: VecDeque<downloads::SpeedSample>,
     list_epoch: u64,
     detail_epoch: u64,
     pending_icons: HashSet<String>,
@@ -219,7 +237,7 @@ struct DetailLayout {
 impl AppState {
     pub fn new(hwnd: HWND, gfx: Gfx, width: u32, height: u32) -> Self {
         let cache = update::load_cache();
-        Self {
+        let mut state = Self {
             hwnd,
             gfx,
             width,
@@ -253,6 +271,10 @@ impl AppState {
             list_title: "推荐应用".into(),
             search: Vec::new(),
             focus_search: false,
+            search_caret: 0,
+            search_select_all: false,
+            caret_on: true,
+            high_surrogate: None,
             mode: Mode::Browse,
             detail_index: 0,
             detail_extra: None,
@@ -260,17 +282,25 @@ impl AppState {
             hover: None,
             status: "正在连接应用目录…".into(),
             loading: true,
-            updates: cache.items,
+            updates: cache.items.clone(),
+            update_catalog: cache.catalog.clone(),
             update_checking: false,
             update_progress: (0, 0),
             update_checked_at: cache.checked_at,
-            ignored: cache.ignored,
+            ignored: cache.ignored.clone(),
             downloads: Vec::new(),
             next_dl_id: 0,
+            speed_history: VecDeque::with_capacity(downloads::SPEED_SAMPLES),
             list_epoch: 0,
             detail_epoch: 0,
             pending_icons: HashSet::new(),
+        };
+        // The cached badge can be hours old; refresh it against the current
+        // uninstall keys before the first paint (pure local registry read).
+        if !state.update_catalog.is_empty() {
+            state.refresh_updates_local();
         }
+        state
     }
 
     pub(crate) fn hwnd_usize(&self) -> usize {
@@ -279,6 +309,180 @@ impl AppState {
 
     fn search_text(&self) -> String {
         String::from_utf16_lossy(&self.search)
+    }
+
+    /// The input field is a real rectangle; the old hit-test treated the whole
+    /// header strip as the field, so clicks near the title focused it.
+    fn search_box_rect(&self) -> D2D_RECT_F {
+        let w = self.width as f32;
+        gfx::rect(252.0, 18.0, (w - 116.0).max(392.0), 54.0)
+    }
+
+    fn blur_search(&mut self) {
+        self.focus_search = false;
+        self.search_select_all = false;
+        self.caret_on = false;
+        self.high_surrogate = None;
+    }
+
+    /// Start of the UTF-16 character before `at` (never splits a surrogate).
+    fn prev_boundary(units: &[u16], at: usize) -> usize {
+        if at == 0 {
+            return 0;
+        }
+        let mut i = at - 1;
+        if (0xDC00..=0xDFFF).contains(&units[i]) && i > 0 {
+            i -= 1;
+        }
+        i
+    }
+
+    fn next_boundary(units: &[u16], at: usize) -> usize {
+        if at >= units.len() {
+            return units.len();
+        }
+        let mut i = at + 1;
+        if (0xD800..=0xDBFF).contains(&units[at])
+            && i < units.len()
+            && (0xDC00..=0xDFFF).contains(&units[i])
+        {
+            i += 1;
+        }
+        i
+    }
+
+    fn search_insert(&mut self, text: &str) {
+        let units: Vec<u16> = text
+            .encode_utf16()
+            .filter(|c| *c >= 0x20 && *c != 0x7F)
+            .collect();
+        if units.is_empty() {
+            return;
+        }
+        if self.search_select_all {
+            self.search.clear();
+            self.search_caret = 0;
+            self.search_select_all = false;
+        }
+        let at = self.search_caret.min(self.search.len());
+        self.search.splice(at..at, units.iter().copied());
+        self.search_caret = at + units.len();
+        self.caret_on = true;
+        self.invalidate();
+    }
+
+    fn search_backspace(&mut self) {
+        if self.search_select_all {
+            self.search.clear();
+            self.search_caret = 0;
+            self.search_select_all = false;
+        } else {
+            let start = Self::prev_boundary(&self.search, self.search_caret);
+            if start < self.search_caret {
+                self.search.drain(start..self.search_caret);
+                self.search_caret = start;
+            }
+        }
+        self.caret_on = true;
+        self.invalidate();
+    }
+
+    fn search_delete(&mut self) {
+        if self.search_select_all {
+            self.search.clear();
+            self.search_caret = 0;
+            self.search_select_all = false;
+        } else {
+            let end = Self::next_boundary(&self.search, self.search_caret);
+            if end > self.search_caret {
+                self.search.drain(self.search_caret..end);
+            }
+        }
+        self.caret_on = true;
+        self.invalidate();
+    }
+
+    fn search_move(&mut self, delta: isize) {
+        self.search_select_all = false;
+        let len = self.search.len();
+        self.search_caret = if delta < 0 {
+            Self::prev_boundary(&self.search, self.search_caret)
+        } else {
+            Self::next_boundary(&self.search, self.search_caret).min(len)
+        };
+        self.caret_on = true;
+        self.invalidate();
+    }
+
+    fn search_move_edge(&mut self, end: bool) {
+        self.search_select_all = false;
+        self.search_caret = if end { self.search.len() } else { 0 };
+        self.caret_on = true;
+        self.invalidate();
+    }
+
+    /// Clicking inside the field positions the caret at the nearest measured
+    /// glyph boundary instead of always appending to the end.
+    fn search_set_caret_x(&mut self, x: f32) {
+        const LEFT: f32 = 252.0 + 14.0;
+        let target = (x - LEFT).max(0.0);
+        let units = self.search.clone();
+        let mut best = 0usize;
+        let mut best_d = f32::MAX;
+        for i in 0..=units.len() {
+            if i > 0 && i < units.len() && (0xDC00..=0xDFFF).contains(&units[i]) {
+                continue;
+            }
+            let prefix = String::from_utf16_lossy(&units[..i]);
+            let w = self.gfx.measure_width(&prefix, 13, false);
+            let d = (w - target).abs();
+            if d < best_d {
+                best_d = d;
+                best = i;
+            }
+        }
+        self.search_caret = best;
+        self.search_select_all = false;
+        self.caret_on = true;
+        self.high_surrogate = None;
+    }
+
+    fn paste_text(&mut self) {
+        use windows::Win32::Foundation::HGLOBAL;
+        use windows::Win32::System::DataExchange::*;
+        use windows::Win32::System::Memory::*;
+        const CF_UNICODETEXT: u32 = 13;
+        unsafe {
+            if OpenClipboard(Some(self.hwnd)).is_err() {
+                return;
+            }
+            let text = (|| -> Option<String> {
+                let handle = GetClipboardData(CF_UNICODETEXT).ok()?;
+                if handle.0.is_null() {
+                    return None;
+                }
+                let mem = HGLOBAL(handle.0);
+                let ptr = GlobalLock(mem) as *const u16;
+                if ptr.is_null() {
+                    return None;
+                }
+                let mut len = 0usize;
+                while *ptr.add(len) != 0 && len < 4096 {
+                    len += 1;
+                }
+                let s = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+                let _ = GlobalUnlock(mem);
+                Some(s)
+            })();
+            let _ = CloseClipboard();
+            if let Some(s) = text {
+                let clean: String = s
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect();
+                self.search_insert(&clean);
+            }
+        }
     }
 
     /// Fetch logos through a small fixed worker pool. Spawning one thread per
@@ -428,6 +632,7 @@ impl AppState {
     }
 
     pub(crate) fn do_search(&mut self) {
+        self.search_select_all = false;
         let kw = self.search_text().trim().to_string();
         if kw.is_empty() {
             self.select_nav(0);
@@ -861,9 +1066,7 @@ impl AppState {
             p.sub,
         );
 
-        let search_l = 252.0;
-        let search_r = (w - 116.0).max(search_l + 140.0);
-        let sr = gfx::rect(search_l, 18.0, search_r, 54.0);
+        let sr = self.search_box_rect();
         self.gfx.round(sr, 9.0, p.bg);
         self.gfx.outline(
             sr,
@@ -874,29 +1077,35 @@ impl AppState {
             },
             if self.focus_search { 1.5 } else { 1.0 },
         );
-        let shown = if self.search.is_empty() {
-            "搜索店内应用".to_string()
+        let text_r = gfx::rect(sr.left + 14.0, 19.0, sr.right - 12.0, 53.0);
+        let shown = self.search_text();
+        if self.search.is_empty() {
+            // Placeholder only while unfocused; a focused empty field shows a
+            // real caret at the left edge instead of "placeholder + caret".
+            if !self.focus_search {
+                self.gfx.text("搜索店内应用", text_r, 13, false, p.sub);
+            }
         } else {
-            self.search_text()
-        };
-        self.gfx.text(
-            &shown,
-            gfx::rect(search_l + 14.0, 19.0, search_r - 12.0, 53.0),
-            13,
-            false,
-            if self.search.is_empty() {
-                p.sub
-            } else {
-                p.text
-            },
-        );
-        if self.focus_search {
-            let cx = search_l + 14.0 + self.gfx.measure_width(&shown, 13, false) + 1.0;
-            let right = (search_r - 10.0).max(cx);
-            self.gfx.fill(
-                gfx::rect(cx.min(right), 22.0, cx.min(right) + 1.2, 46.0),
-                p.accent,
-            );
+            if self.search_select_all {
+                let tw = self.gfx.measure_width(&shown, 13, false);
+                self.gfx.fill(
+                    gfx::rect(
+                        sr.left + 14.0,
+                        23.0,
+                        (sr.left + 14.0 + tw).min(sr.right - 10.0),
+                        48.0,
+                    ),
+                    p.accent_soft,
+                );
+            }
+            self.gfx.text(&shown, text_r, 13, false, p.text);
+        }
+        if self.focus_search && self.caret_on {
+            let at = self.search_caret.min(self.search.len());
+            let prefix = String::from_utf16_lossy(&self.search[..at]);
+            let cx = sr.left + 14.0 + self.gfx.measure_width(&prefix, 13, false);
+            let cx = cx.min(sr.right - 8.0).max(sr.left + 14.0);
+            self.gfx.fill(gfx::rect(cx, 22.0, cx + 1.4, 46.0), p.accent);
         }
         let br = Self::search_button_rect(w);
         draw_button(
@@ -1449,8 +1658,7 @@ impl AppState {
         let w = self.width as f32;
         let h = self.height as f32;
         if y < TOP_H {
-            let search_r = (w - 116.0).max(392.0);
-            if x >= 252.0 && x <= search_r {
+            if in_rect(x, y, self.search_box_rect()) {
                 return Some((HIT_SEARCH_BOX, 0));
             }
             if in_rect(x, y, Self::search_button_rect(w)) {
@@ -1508,7 +1716,13 @@ impl AppState {
 
     fn hit(&mut self, x: f32, y: f32) {
         let target = self.hit_test(x, y);
-        self.focus_search = target == Some((HIT_SEARCH_BOX, 0));
+        let into_field = target == Some((HIT_SEARCH_BOX, 0));
+        self.focus_search = into_field;
+        if into_field {
+            self.search_set_caret_x(x);
+        } else {
+            self.blur_search();
+        }
         match target {
             Some((HIT_SEARCH_BTN, 0)) => self.do_search(),
             Some((HIT_NAV, i)) => {
@@ -1566,6 +1780,62 @@ impl AppState {
                 Some(LRESULT(0))
             }
             WM_ERASEBKGND => Some(LRESULT(1)),
+            WM_SETCURSOR => {
+                // Show an I-beam over the input field. Without this the arrow
+                // never changes and the field does not feel typeable.
+                if (lparam.0 as u32 & 0xFFFF) == HTCLIENT {
+                    let mut pt = POINT::default();
+                    unsafe {
+                        let _ = GetCursorPos(&mut pt);
+                        let _ = ScreenToClient(self.hwnd, &mut pt);
+                    }
+                    let s = self.gfx.scale.max(0.5);
+                    let over = in_rect(pt.x as f32 / s, pt.y as f32 / s, self.search_box_rect());
+                    let id = if over { IDC_IBEAM } else { IDC_ARROW };
+                    unsafe {
+                        if let Ok(c) = LoadCursorW(None, id) {
+                            SetCursor(Some(c));
+                        }
+                    }
+                    Some(LRESULT(1))
+                } else {
+                    None
+                }
+            }
+            WM_TIMER => {
+                if wparam.0 != TIMER_ID {
+                    return None;
+                }
+                if self.focus_search {
+                    self.caret_on = !self.caret_on;
+                }
+                self.sample_speeds();
+                // Avoid repainting every other page twice a second.
+                if self.mode == Mode::Downloads || self.focus_search {
+                    self.invalidate();
+                }
+                Some(LRESULT(0))
+            }
+            WM_KILLFOCUS => {
+                self.caret_on = false;
+                self.invalidate();
+                None
+            }
+            WM_ACTIVATEAPP => {
+                // The user may have run an installer in another window.
+                if wparam.0 != 0
+                    && self.mode == Mode::Updates
+                    && !self.update_checking
+                    && self.refresh_updates_local()
+                {
+                    self.status = format!(
+                        "本机版本已更新  ·  现有 {} 个可更新应用",
+                        self.updates.len()
+                    );
+                    self.invalidate();
+                }
+                None
+            }
             WM_SIZE => {
                 // Sizes here are physical pixels. `render()` derives the DIP
                 // size from the client rect + current scale; writing physical
@@ -1638,34 +1908,41 @@ impl AppState {
             WM_CHAR => {
                 if self.focus_search {
                     let c = (wparam.0 & 0xFFFF) as u16;
-                    if c >= 0x20 && c != 0x7F {
-                        self.search.push(c);
-                        self.invalidate();
+                    if (0xD800..=0xDBFF).contains(&c) {
+                        self.high_surrogate = Some(c);
+                    } else if (0xDC00..=0xDFFF).contains(&c) {
+                        if let Some(hi) = self.high_surrogate.take() {
+                            self.search_insert(&String::from_utf16_lossy(&[hi, c]));
+                        }
+                    } else if c >= 0x20 && c != 0x7F {
+                        self.high_surrogate = None;
+                        self.search_insert(&String::from_utf16_lossy(&[c]));
                     }
                 }
                 Some(LRESULT(0))
             }
-            WM_KEYDOWN => match wparam.0 {
-                8 => {
-                    if self.focus_search {
-                        self.search.pop();
-                        // Keep surrogate pairs intact when deleting emoji.
-                        if let Some(&last) = self.search.last()
-                            && (0xD800..=0xDBFF).contains(&last)
-                        {
-                            self.search.pop();
+            WM_KEYDOWN => {
+                let key = wparam.0;
+                let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+                if self.focus_search {
+                    match key {
+                        8 => self.search_backspace(),
+                        46 => self.search_delete(),
+                        37 => self.search_move(-1),
+                        39 => self.search_move(1),
+                        36 => self.search_move_edge(false),
+                        35 => self.search_move_edge(true),
+                        13 => self.do_search(),
+                        65 if ctrl => {
+                            self.search_select_all = true;
+                            self.invalidate();
                         }
-                        self.invalidate();
+                        86 if ctrl => self.paste_text(),
+                        _ => {}
                     }
-                    Some(LRESULT(0))
+                    return Some(LRESULT(0));
                 }
-                13 => {
-                    if self.focus_search {
-                        self.do_search();
-                    }
-                    Some(LRESULT(0))
-                }
-                27 => {
+                if key == 27 {
                     self.mode = Mode::Browse;
                     if self
                         .nav
@@ -1675,12 +1952,12 @@ impl AppState {
                         self.active_nav = 0;
                     }
                     self.scroll = 0;
-                    self.focus_search = false;
+                    self.blur_search();
                     self.invalidate();
-                    Some(LRESULT(0))
+                    return Some(LRESULT(0));
                 }
-                _ => None,
-            },
+                None
+            }
             WM_APP_DATA
             | WM_APP_LIST
             | WM_APP_ICON
@@ -1764,8 +2041,9 @@ impl AppState {
                     done,
                     total,
                     speed,
+                    disk,
                 },
-            ) => self.on_dl_progress(id, done, total, speed),
+            ) => self.on_dl_progress(id, done, total, speed, disk),
             (WM_APP_DL_DONE, Payload::DlDone { id, result }) => self.on_dl_done(id, result),
             (WM_APP_UPDATE_PROGRESS, Payload::UpdateProgress(d, t)) => {
                 self.on_update_progress(d, t)
@@ -1989,5 +2267,37 @@ mod tests {
             w - 196.0 < download.left,
             "progress overlaps download button"
         );
+    }
+
+    #[test]
+    fn search_field_is_a_real_rect_and_leaves_the_title_alone() {
+        for w in [1000.0f32, 1100.0, 2048.0] {
+            // The renderer derives the rect from self.width; the geometry is
+            // the same formula, so assert the token relationship directly.
+            let r = gfx::rect(252.0, 18.0, (w - 116.0).max(392.0), 54.0);
+            assert!(r.right > r.left + 100.0);
+            assert!(r.top >= 0.0 && r.bottom <= TOP_H);
+            let title = gfx::rect(66.0, 12.0, 240.0, 62.0);
+            assert!(!overlaps(r, title), "search field covers the app title");
+            assert!(r.left > title.right);
+            let button = AppState::search_button_rect(w);
+            assert!(r.right < button.left, "field overlaps search button");
+        }
+    }
+
+    #[test]
+    fn caret_moves_by_whole_utf16_characters() {
+        // "A" + emoji (surrogate pair) + "B"
+        let units: Vec<u16> = "A😀B".encode_utf16().collect();
+        assert_eq!(units.len(), 4);
+        let end = units.len();
+        assert_eq!(AppState::prev_boundary(&units, end), 3);
+        assert_eq!(AppState::prev_boundary(&units, 3), 1);
+        assert_eq!(AppState::prev_boundary(&units, 1), 0);
+        assert_eq!(AppState::prev_boundary(&units, 0), 0);
+        assert_eq!(AppState::next_boundary(&units, 0), 1);
+        assert_eq!(AppState::next_boundary(&units, 1), 3);
+        assert_eq!(AppState::next_boundary(&units, 3), 4);
+        assert_eq!(AppState::next_boundary(&units, 4), 4);
     }
 }

@@ -18,7 +18,7 @@ use crate::app::{
 use crate::downloads::Progress;
 use crate::gfx;
 use crate::net;
-use crate::update::{self, UpdateItem};
+use crate::update;
 
 fn sanitize(name: &str) -> String {
     let out: String = name
@@ -202,6 +202,7 @@ pub(crate) fn download_package_ex(
             if progress.total() == 0 && total_hint.get() > 0 {
                 progress.set_total(total_hint.get());
             }
+            progress.written(chunk.len());
             progress.add(chunk.len());
             true
         };
@@ -259,17 +260,42 @@ fn finalize(
 
 impl AppState {
     pub(crate) fn show_updates(&mut self) {
-        if self.update_checked_at == 0 {
+        // Without a cached catalog there is nothing to re-match locally.
+        if self.update_catalog.is_empty() || self.update_checked_at == 0 {
+            self.start_update_check();
+            return;
+        }
+        // The user may have just run an installer. Re-read the uninstall keys
+        // before showing the count; this is a local registry scan, no network.
+        self.refresh_updates_local();
+        let stale = update::now().saturating_sub(self.update_checked_at) > 6 * 3600;
+        if stale && !self.update_checking {
             self.start_update_check();
             return;
         }
         let hours = update::now().saturating_sub(self.update_checked_at) / 3600;
         self.status = format!(
-            "软件更新  ·  {} 个可更新  ·  上次检查 {} 小时前  ·  仅本地比对",
+            "软件更新  ·  {} 个可更新  ·  已重新扫描本机  ·  目录检查于 {} 小时前",
             self.updates.len(),
             hours
         );
         self.invalidate();
+    }
+
+    /// Fast local-only refresh: no catalog request, no data leaves the machine.
+    /// Returns true when the visible list actually changed.
+    pub(crate) fn refresh_updates_local(&mut self) -> bool {
+        if self.update_catalog.is_empty() {
+            return false;
+        }
+        let items = update::rescan(&self.update_catalog, &self.ignored);
+        let changed = items.len() != self.updates.len()
+            || items.iter().zip(self.updates.iter()).any(|(a, b)| {
+                a.soft_id != b.soft_id || a.current != b.current || a.latest != b.latest
+            });
+        self.updates = items;
+        self.save_update_cache();
+        changed
     }
 
     pub(crate) fn start_update_check(&mut self) {
@@ -296,11 +322,9 @@ impl AppState {
                     Payload::UpdateProgress(done, total),
                 );
             };
-            let result = update::check(&token, &mut report).map(|items| {
-                items
-                    .into_iter()
-                    .filter(|i| !ignored.contains(&i.soft_id))
-                    .collect::<Vec<_>>()
+            let result = update::check(&token, &mut report).map(|mut r| {
+                r.items.retain(|i| !ignored.contains(&i.soft_id));
+                r
             });
             post(h, WM_APP_UPDATE_DONE, Payload::UpdateDone(result));
         });
@@ -312,11 +336,12 @@ impl AppState {
         self.invalidate();
     }
 
-    pub(crate) fn on_update_done(&mut self, result: Result<Vec<UpdateItem>, String>) {
+    pub(crate) fn on_update_done(&mut self, result: Result<update::CheckResult, String>) {
         self.update_checking = false;
         match result {
-            Ok(items) => {
-                self.updates = items;
+            Ok(r) => {
+                self.update_catalog = r.catalog;
+                self.updates = r.items;
                 self.update_checked_at = update::now();
                 self.save_update_cache();
                 self.queue_icons();
@@ -332,6 +357,7 @@ impl AppState {
             checked_at: self.update_checked_at,
             items: self.updates.clone(),
             ignored: self.ignored.clone(),
+            catalog: self.update_catalog.clone(),
         });
     }
 
@@ -587,6 +613,7 @@ impl AppState {
                         done: 0,
                         total: 0,
                         speed: 0.0,
+                        disk: 0.0,
                     },
                 );
                 let result = download_package_ex(&name, &url, h, Some(id), Some(cancel));

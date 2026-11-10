@@ -1,11 +1,11 @@
 //! Data model for the Lenovo content API. Only store-relevant fields are kept;
 //! promotional / telemetry endpoints are never requested.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const CH: &str = "9.0.3200.0917";
 pub const BASE: &str = "https://pc-store.lenovomm.cn";
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct App {
     #[serde(rename = "softID", default)]
     pub id: String,

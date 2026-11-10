@@ -35,7 +35,7 @@ impl Color {
 }
 
 impl Palette {
-    fn all(self) -> [Color; 13] {
+    fn all(self) -> [Color; 17] {
         [
             self.bg,
             self.panel,
@@ -50,6 +50,10 @@ impl Palette {
             self.accent_soft,
             self.subtle,
             self.danger,
+            self.net,
+            self.disk,
+            self.net_line,
+            self.disk_line,
         ]
     }
 }
@@ -69,6 +73,12 @@ pub struct Palette {
     pub border: Color,
     pub status: Color,
     pub danger: Color,
+    /// Transfer graph: translucent bars for each instantaneous sample and
+    /// solid lines for the smoothed trend. Network = blue, disk = teal.
+    pub net: Color,
+    pub disk: Color,
+    pub net_line: Color,
+    pub disk_line: Color,
 }
 
 pub fn palette(dark: bool) -> Palette {
@@ -87,6 +97,10 @@ pub fn palette(dark: bool) -> Palette {
             border: Color(0.243, 0.267, 0.310, 1.0),
             status: Color(0.118, 0.129, 0.157, 1.0),
             danger: Color(0.976, 0.447, 0.447, 1.0),
+            net: Color(0.353, 0.604, 1.0, 0.46),
+            disk: Color(0.290, 0.855, 0.710, 0.34),
+            net_line: Color(0.529, 0.741, 1.0, 1.0),
+            disk_line: Color(0.400, 0.929, 0.780, 1.0),
         }
     } else {
         Palette {
@@ -103,6 +117,10 @@ pub fn palette(dark: bool) -> Palette {
             border: Color(0.886, 0.906, 0.933, 1.0),
             status: Color(0.933, 0.949, 0.969, 1.0),
             danger: Color(0.843, 0.196, 0.224, 1.0),
+            net: Color(0.145, 0.388, 0.898, 0.42),
+            disk: Color(0.055, 0.647, 0.545, 0.34),
+            net_line: Color(0.098, 0.298, 0.780, 1.0),
+            disk_line: Color(0.020, 0.478, 0.404, 1.0),
         }
     }
 }
@@ -398,6 +416,21 @@ impl Gfx {
                     radiusY: radius,
                 };
                 self.rt.FillRoundedRectangle(&rr, b);
+            }
+        }
+    }
+
+    /// Straight line segment, used by the transfer-speed trend graph.
+    pub fn line(&self, x0: f32, y0: f32, x1: f32, y1: f32, c: Color, width: f32) {
+        if let Some(b) = self.brush(c) {
+            unsafe {
+                self.rt.DrawLine(
+                    Vector2 { X: x0, Y: y0 },
+                    Vector2 { X: x1, Y: y1 },
+                    b,
+                    width,
+                    None,
+                );
             }
         }
     }

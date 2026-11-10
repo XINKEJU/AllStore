@@ -121,6 +121,8 @@ fn main() {
 
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = UpdateWindow(hwnd);
+        // 500 ms clock: caret blink + transfer-speed sampling for the graph.
+        SetTimer(Some(hwnd), app::TIMER_ID, 500, None);
         // Remove stale partial downloads from our own temp folder (never from
         // the user's Downloads directory).
         updates_ui::cleanup_temp();
@@ -137,6 +139,7 @@ fn main() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        let _ = KillTimer(Some(hwnd), app::TIMER_ID);
         CoUninitialize();
     }
 }

@@ -30,6 +30,16 @@ pub struct Cache {
     pub checked_at: u64,
     pub items: Vec<UpdateItem>,
     pub ignored: Vec<String>,
+    /// Catalog snapshot. Keeping it lets the app re-match the local registry
+    /// after an install without re-downloading the whole store catalog.
+    #[serde(default)]
+    pub catalog: Vec<App>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckResult {
+    pub catalog: Vec<App>,
+    pub items: Vec<UpdateItem>,
 }
 
 pub fn now() -> u64 {
@@ -109,13 +119,28 @@ fn catalog(token: &str, progress: &mut dyn FnMut(usize, usize)) -> Result<Vec<Ap
     Ok(out)
 }
 
-pub fn check(
-    token: &str,
-    progress: &mut dyn FnMut(usize, usize),
-) -> Result<Vec<UpdateItem>, String> {
-    let apps = catalog(token, progress)?;
+pub fn check(token: &str, progress: &mut dyn FnMut(usize, usize)) -> Result<CheckResult, String> {
+    let catalog = catalog(token, progress)?;
     let local = installed::scan();
-    Ok(match_updates(&apps, &local))
+    Ok(CheckResult {
+        items: match_updates(&catalog, &local),
+        catalog,
+    })
+}
+
+/// Re-read the local uninstall keys and compare them with a cached catalog.
+/// This is what makes the "N updates" badge drop right after an installer
+/// finishes — the old code only ever refreshed the list on a full network
+/// check, so a freshly updated app kept showing as outdated for hours.
+pub fn rescan_with(catalog: &[App], local: &[Installed], ignored: &[String]) -> Vec<UpdateItem> {
+    match_updates(catalog, local)
+        .into_iter()
+        .filter(|i| !ignored.contains(&i.soft_id))
+        .collect()
+}
+
+pub fn rescan(catalog: &[App], ignored: &[String]) -> Vec<UpdateItem> {
+    rescan_with(catalog, &installed::scan(), ignored)
 }
 
 /// Pure function so the matching rules can be exercised without network or
@@ -218,15 +243,31 @@ mod tests {
         assert_eq!(out[0].latest, "9.9.37");
     }
 
+    #[test]
+    fn rescan_drops_an_app_once_the_installed_version_catches_up() {
+        let catalog = vec![app("微信", "3.9.10", "1"), app("QQ", "9.9.37", "2")];
+        let before = vec![installed("微信", "3.9.8"), installed("QQ", "9.9.30")];
+        assert_eq!(rescan_with(&catalog, &before, &[]).len(), 2);
+
+        // The user ran the installer: only the registry version changed.
+        let after = vec![installed("微信", "3.9.10"), installed("QQ", "9.9.30")];
+        let items = rescan_with(&catalog, &after, &[]);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].soft_id, "2");
+
+        let ignored = vec!["2".to_string()];
+        assert!(rescan_with(&catalog, &after, &ignored).is_empty());
+    }
+
     /// Diagnostic for the real update check. Run with `cargo test -- --ignored`.
     #[test]
     #[ignore = "requires live network"]
     fn live_catalog_matches_local_inventory() {
         let token = net::register().expect("token registration");
         let mut progress = |_, _| {};
-        let items = check(&token, &mut progress).expect("update check");
-        println!("matched {} updatable apps", items.len());
-        for u in items.iter().take(12) {
+        let result = check(&token, &mut progress).expect("update check");
+        println!("matched {} updatable apps", result.items.len());
+        for u in result.items.iter().take(12) {
             println!("  {} : {} -> {}", u.name, u.current, u.latest);
         }
     }

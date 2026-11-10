@@ -13,6 +13,8 @@ mod library;
 mod model;
 mod net;
 mod persist;
+mod selfupdate;
+mod settings_ui;
 mod source;
 mod toast;
 mod update;

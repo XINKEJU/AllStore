@@ -27,6 +27,9 @@ use crate::installed::{InstalledApp, Inventory};
 use crate::library;
 use crate::model::{App, ClassGroup, Detail, html_to_text};
 use crate::net;
+use crate::selfupdate;
+use crate::settings_ui;
+use crate::source;
 use crate::update::{self, UpdateItem};
 use crate::updates_ui;
 
@@ -40,6 +43,10 @@ pub const WM_APP_UPDATE_DONE: u32 = 0x8000 + 8;
 pub const WM_APP_DL_PROGRESS: u32 = 0x8000 + 9;
 pub const WM_APP_DL_DONE: u32 = 0x8000 + 10;
 pub const WM_APP_FALLBACK: u32 = 0x8000 + 12;
+/// The installer launched from the download page has exited; rescan locally.
+pub const WM_APP_INSTALL_DONE: u32 = 0x8000 + 13;
+/// Result of the background check for a newer AllStore build.
+pub const WM_APP_SELFUPDATE: u32 = 0x8000 + 14;
 /// Single 500 ms clock for caret blink and speed-graph sampling.
 pub const TIMER_ID: usize = 1;
 
@@ -112,6 +119,17 @@ pub const HIT_LIB_UNINSTALL: u8 = 27;
 pub const HIT_SOURCE: u8 = 28;
 /// Rescan the registry inventory on the "我的软件" page.
 pub const HIT_LIB_REFRESH: u8 = 32;
+// Settings page.
+pub const HIT_SET_TOGGLE: u8 = 33;
+pub const HIT_SET_FIELD: u8 = 34;
+pub const HIT_SET_ADD: u8 = 35;
+pub const HIT_SET_REMOVE: u8 = 36;
+pub const HIT_SET_DIR: u8 = 37;
+pub const HIT_SET_DIR_RESET: u8 = 38;
+pub const HIT_SET_CONCURRENCY: u8 = 39;
+pub const HIT_SET_THEME: u8 = 40;
+pub const HIT_SET_SELF_CHECK: u8 = 41;
+pub const HIT_SET_SELF_GET: u8 = 42;
 
 pub enum Payload {
     Data(Result<(String, Vec<ClassGroup>, Vec<App>), String>),
@@ -142,6 +160,10 @@ pub enum Payload {
     },
     UpdateProgress(usize, usize),
     UpdateDone(Result<update::CheckResult, String>),
+    /// A launched installer finished; refresh the installed inventory.
+    InstallDone,
+    /// Result of checking GitHub for a newer AllStore build.
+    SelfUpdate(Result<Option<crate::selfupdate::Release>, String>),
 }
 
 pub(crate) fn post(hwnd_usize: usize, msg: u32, p: Payload) {
@@ -160,6 +182,7 @@ pub enum NavKind {
     Updates,
     Downloads,
     Library,
+    Settings,
 }
 
 #[derive(Clone)]
@@ -179,6 +202,15 @@ pub enum Mode {
     Updates,
     Downloads,
     Library,
+    Settings,
+}
+
+/// The two free-text inputs on the settings page. Editing is routed here so
+/// typing, selection and paste behave exactly like the search box.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    SourceName,
+    SourceUrl,
 }
 
 pub struct AppState {
@@ -255,6 +287,19 @@ pub struct AppState {
     /// Taskbar overlay progress for the download queue (ITaskbarList3).
     /// None when COM init failed — progress then lives only in the window.
     pub(crate) taskbar: Option<ITaskbarList3>,
+    /// User preferences (enabled sources, custom sources, theme, download
+    /// folder, concurrency), persisted next to the catalog cache.
+    pub settings: source::Settings,
+    /// Text currently being typed into a settings field, if any.
+    pub field: Option<Field>,
+    pub field_caret: usize,
+    pub src_name: Vec<u16>,
+    pub src_url: Vec<u16>,
+    /// Newer AllStore build found on GitHub, if any.
+    pub self_update: Option<selfupdate::Release>,
+    /// One-line status for the "关于" card.
+    pub self_update_note: String,
+    pub checking_update: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -391,7 +436,20 @@ impl AppState {
                     .ok()
                     .and_then(|t| t.HrInit().ok().map(|_| t))
             },
+            settings: source::load_settings(),
+            field: None,
+            field_caret: 0,
+            src_name: Vec::new(),
+            src_url: Vec::new(),
+            self_update: None,
+            self_update_note: String::new(),
+            checking_update: false,
         };
+        downloads::set_max_concurrent(state.settings.concurrency());
+        state.apply_theme();
+        // One small API call at launch; failures stay silent in the status line
+        // of the "关于" card and never block the window from opening.
+        state.check_self_update();
         // Restore the durable download queue BEFORE cleaning the temp folder,
         // so partials belonging to live tasks are kept and can be resumed.
         state.restore_downloads();
@@ -468,21 +526,12 @@ impl AppState {
     }
 
     fn search_insert(&mut self, text: &str) {
-        let units: Vec<u16> = text
-            .encode_utf16()
-            .filter(|c| *c >= 0x20 && *c != 0x7F)
-            .collect();
-        if units.is_empty() {
-            return;
-        }
         if self.search_select_all {
             self.search.clear();
             self.search_caret = 0;
             self.search_select_all = false;
         }
-        let at = self.search_caret.min(self.search.len());
-        self.search.splice(at..at, units.iter().copied());
-        self.search_caret = at + units.len();
+        Self::edit_insert(&mut self.search, &mut self.search_caret, text);
         self.caret_on = true;
         self.invalidate();
     }
@@ -493,11 +542,7 @@ impl AppState {
             self.search_caret = 0;
             self.search_select_all = false;
         } else {
-            let start = Self::prev_boundary(&self.search, self.search_caret);
-            if start < self.search_caret {
-                self.search.drain(start..self.search_caret);
-                self.search_caret = start;
-            }
+            Self::edit_backspace(&mut self.search, &mut self.search_caret);
         }
         self.caret_on = true;
         self.invalidate();
@@ -509,10 +554,7 @@ impl AppState {
             self.search_caret = 0;
             self.search_select_all = false;
         } else {
-            let end = Self::next_boundary(&self.search, self.search_caret);
-            if end > self.search_caret {
-                self.search.drain(self.search_caret..end);
-            }
+            Self::edit_delete(&mut self.search, &mut self.search_caret);
         }
         self.caret_on = true;
         self.invalidate();
@@ -520,21 +562,67 @@ impl AppState {
 
     fn search_move(&mut self, delta: isize) {
         self.search_select_all = false;
-        let len = self.search.len();
-        self.search_caret = if delta < 0 {
-            Self::prev_boundary(&self.search, self.search_caret)
-        } else {
-            Self::next_boundary(&self.search, self.search_caret).min(len)
-        };
+        Self::edit_move(&self.search, &mut self.search_caret, delta);
         self.caret_on = true;
         self.invalidate();
     }
 
     fn search_move_edge(&mut self, end: bool) {
         self.search_select_all = false;
-        self.search_caret = if end { self.search.len() } else { 0 };
+        Self::edit_edge(&self.search, &mut self.search_caret, end);
         self.caret_on = true;
         self.invalidate();
+    }
+
+    // --- shared single-line editing primitives ------------------------------
+
+    fn edit_insert(buf: &mut Vec<u16>, caret: &mut usize, text: &str) {
+        let units: Vec<u16> = text
+            .encode_utf16()
+            .filter(|c| *c >= 0x20 && *c != 0x7F)
+            .collect();
+        if units.is_empty() {
+            return;
+        }
+        let at = (*caret).min(buf.len());
+        buf.splice(at..at, units.iter().copied());
+        *caret = at + units.len();
+    }
+
+    fn edit_backspace(buf: &mut Vec<u16>, caret: &mut usize) {
+        let start = Self::prev_boundary(buf, *caret);
+        if start < *caret {
+            buf.drain(start..*caret);
+            *caret = start;
+        }
+    }
+
+    fn edit_delete(buf: &mut Vec<u16>, caret: &mut usize) {
+        let end = Self::next_boundary(buf, *caret);
+        if end > *caret {
+            buf.drain(*caret..end);
+        }
+    }
+
+    fn edit_move(buf: &[u16], caret: &mut usize, delta: isize) {
+        *caret = if delta < 0 {
+            Self::prev_boundary(buf, *caret)
+        } else {
+            Self::next_boundary(buf, *caret).min(buf.len())
+        };
+    }
+
+    fn edit_edge(buf: &[u16], caret: &mut usize, end: bool) {
+        *caret = if end { buf.len() } else { 0 };
+    }
+
+    /// Buffer behind the focused settings input.
+    pub(crate) fn field_text(&mut self) -> Option<&mut Vec<u16>> {
+        match self.field {
+            Some(Field::SourceName) => Some(&mut self.src_name),
+            Some(Field::SourceUrl) => Some(&mut self.src_url),
+            None => None,
+        }
     }
 
     /// Clicking inside the field positions the caret at the nearest measured
@@ -596,9 +684,73 @@ impl AppState {
                     .chars()
                     .map(|c| if c.is_control() { ' ' } else { c })
                     .collect();
-                self.search_insert(&clean);
+                // Paste goes wherever the caret is: search box or a settings
+                // input, whichever currently has keyboard focus.
+                self.typed_text(&clean);
             }
         }
+    }
+
+    /// Insert typed characters into whichever single-line field has focus.
+    fn typed_text(&mut self, text: &str) {
+        match self.field {
+            Some(Field::SourceName) => {
+                Self::edit_insert(&mut self.src_name, &mut self.field_caret, text)
+            }
+            Some(Field::SourceUrl) => {
+                Self::edit_insert(&mut self.src_url, &mut self.field_caret, text)
+            }
+            None => {
+                self.search_insert(text);
+                return;
+            }
+        }
+        self.caret_on = true;
+        self.invalidate();
+    }
+
+    /// Buffer + caret of the focused settings input.
+    fn field_pair(&mut self) -> Option<(&mut Vec<u16>, &mut usize)> {
+        let caret = &mut self.field_caret;
+        match self.field {
+            Some(Field::SourceName) => Some((&mut self.src_name, caret)),
+            Some(Field::SourceUrl) => Some((&mut self.src_url, caret)),
+            None => None,
+        }
+    }
+
+    /// Editing keys for the settings inputs. Returns true when consumed.
+    fn field_key(&mut self, key: usize) -> bool {
+        if self.field.is_none() {
+            return false;
+        }
+        let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+        match key {
+            13 => {
+                settings_ui::commit_custom(self);
+                return true;
+            }
+            86 if ctrl => {
+                self.paste_text();
+                return true;
+            }
+            _ => {}
+        }
+        let Some((buf, caret)) = self.field_pair() else {
+            return false;
+        };
+        match key {
+            8 => Self::edit_backspace(buf, caret),
+            46 => Self::edit_delete(buf, caret),
+            37 => Self::edit_move(buf, caret, -1),
+            39 => Self::edit_move(buf, caret, 1),
+            36 => Self::edit_edge(buf, caret, false),
+            35 => Self::edit_edge(buf, caret, true),
+            _ => return false,
+        }
+        self.caret_on = true;
+        self.invalidate();
+        true
     }
 
     /// Fetch logos through a small fixed worker pool. Spawning one thread per
@@ -756,6 +908,7 @@ impl AppState {
             ("软件更新", "", "", NavKind::Updates, 1u8),
             ("下载管理", "", "", NavKind::Downloads, 1u8),
             ("我的软件", "", "", NavKind::Library, 1u8),
+            ("设置", "", "", NavKind::Settings, 1u8),
         ] {
             self.nav.push(NavItem {
                 label: label.into(),
@@ -792,6 +945,31 @@ impl AppState {
         self.list_epoch
     }
 
+    /// Push the configured theme into the renderer and the title bar. Called at
+    /// start-up, when the user picks another theme, and when Windows reports a
+    /// theme change while the preference is "follow system".
+    pub(crate) fn apply_theme(&mut self) {
+        let dark = match self.settings.theme {
+            source::Theme::Light => false,
+            source::Theme::Dark => true,
+            source::Theme::System => gfx::system_dark(),
+        };
+        if dark != self.gfx.is_dark() {
+            self.gfx.set_dark(dark);
+            self.invalidate();
+        }
+        // DWMWA_USE_IMMERSIVE_DARK_MODE = 20 on Windows 10 1809+.
+        let value: i32 = if dark { 1 } else { 0 };
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                self.hwnd,
+                DWMWINDOWATTRIBUTE(20),
+                &value as *const i32 as *const c_void,
+                4,
+            );
+        }
+    }
+
     fn select_nav(&mut self, idx: usize) {
         if idx >= self.nav.len() {
             return;
@@ -819,6 +997,13 @@ impl AppState {
             }
             NavKind::Library => {
                 self.show_library();
+                return;
+            }
+            NavKind::Settings => {
+                self.mode = Mode::Settings;
+                self.field = None;
+                self.status = "设置  ·  修改立即保存到本机".into();
+                self.invalidate();
                 return;
             }
             NavKind::Browse => {}
@@ -1255,6 +1440,7 @@ impl AppState {
             Mode::Updates => self.update_max_scroll(),
             Mode::Downloads => self.dl_max_scroll(),
             Mode::Library => self.lib_max_scroll(),
+            Mode::Settings => settings_ui::max_scroll(self, h),
             Mode::Detail => {
                 let layout = self.detail_layout(self.width as f32);
                 let visible = (h - STATUS_H - DETAIL_BODY_TOP).max(0.0);
@@ -1319,6 +1505,7 @@ impl AppState {
             Mode::Updates => self.render_updates(w, h),
             Mode::Downloads => self.render_downloads(w, h),
             Mode::Library => self.render_library(w, h),
+            Mode::Settings => self.render_settings(w, h),
             Mode::Browse => self.render_browse(w, h),
         }
         self.draw_scrollbar(w, h);
@@ -1457,7 +1644,7 @@ impl AppState {
             .map(|n| match n.kind {
                 NavKind::Updates => self.updates.len(),
                 NavKind::Downloads => active_downloads,
-                NavKind::Browse | NavKind::Library => 0,
+                NavKind::Browse | NavKind::Library | NavKind::Settings => 0,
             })
             .collect();
         // Reserve the footer band: without this the last category row was
@@ -2129,6 +2316,7 @@ impl AppState {
             Mode::Updates => updates_ui::hit_targets(self, x, y),
             Mode::Downloads => downloads::hit_targets(self, x, y),
             Mode::Library => library::hit_targets(self, x, y),
+            Mode::Settings => settings_ui::hit_targets(self, x, y),
             Mode::Browse => {
                 if in_rect(x, y, Self::hero_dl_rect(w)) {
                     return Some((HIT_DL_NAV, 0));
@@ -2158,6 +2346,36 @@ impl AppState {
 
     fn hit(&mut self, x: f32, y: f32) {
         let target = self.hit_test(x, y);
+        if self.mode == Mode::Settings {
+            // Only the page's own widgets are consumed here; nav, status bar and
+            // header hits fall through to the shared handling below so leaving
+            // the page still works.
+            match target {
+                Some((HIT_SET_FIELD, i)) => {
+                    self.focus_search = false;
+                    self.blur_search();
+                    self.field = Some(if i == 0 {
+                        Field::SourceName
+                    } else {
+                        Field::SourceUrl
+                    });
+                    let len = self.field_text().map(|v| v.len()).unwrap_or(0);
+                    self.field_caret = len;
+                    self.caret_on = true;
+                    self.invalidate();
+                    return;
+                }
+                Some((kind, i)) if kind >= HIT_SET_TOGGLE => {
+                    self.focus_search = false;
+                    self.blur_search();
+                    self.field = None;
+                    settings_ui::apply(self, kind, i);
+                    self.invalidate();
+                    return;
+                }
+                _ => self.field = None,
+            }
+        }
         let into_field = target == Some((HIT_SEARCH_BOX, 0));
         self.focus_search = into_field;
         if into_field {
@@ -2256,7 +2474,15 @@ impl AppState {
                         let _ = ScreenToClient(self.hwnd, &mut pt);
                     }
                     let s = self.gfx.scale.max(0.5);
-                    let over = in_rect(pt.x as f32 / s, pt.y as f32 / s, self.search_box_rect());
+                    let (px, py) = (pt.x as f32 / s, pt.y as f32 / s);
+                    let over = if self.mode == Mode::Settings {
+                        matches!(
+                            settings_ui::hit_targets(self, px, py),
+                            Some((HIT_SET_FIELD, _))
+                        )
+                    } else {
+                        in_rect(px, py, self.search_box_rect())
+                    };
                     let id = if over { IDC_IBEAM } else { IDC_ARROW };
                     unsafe {
                         if let Ok(c) = LoadCursorW(None, id) {
@@ -2307,22 +2533,10 @@ impl AppState {
             }
             WM_SETTINGCHANGE => {
                 // Windows 11 lets the user flip the app theme from Settings
-                // while we are running. Follow it instead of asking for a
-                // restart; the registry read is cheap and only applied when
-                // the value actually changed.
-                let dark = gfx::system_dark();
-                if dark != self.gfx.is_dark() {
-                    self.gfx.set_dark(dark);
-                    let value: i32 = if dark { 1 } else { 0 };
-                    unsafe {
-                        let _ = DwmSetWindowAttribute(
-                            self.hwnd,
-                            DWMWINDOWATTRIBUTE(20),
-                            &value as *const i32 as *const c_void,
-                            4,
-                        );
-                    }
-                    self.invalidate();
+                // while we are running. Follow it unless the user pinned an
+                // explicit theme on the settings page.
+                if self.settings.theme == source::Theme::System {
+                    self.apply_theme();
                 }
                 None
             }
@@ -2403,17 +2617,17 @@ impl AppState {
                 Some(LRESULT(0))
             }
             WM_CHAR => {
-                if self.focus_search {
+                if self.focus_search || self.field.is_some() {
                     let c = (wparam.0 & 0xFFFF) as u16;
                     if (0xD800..=0xDBFF).contains(&c) {
                         self.high_surrogate = Some(c);
                     } else if (0xDC00..=0xDFFF).contains(&c) {
                         if let Some(hi) = self.high_surrogate.take() {
-                            self.search_insert(&String::from_utf16_lossy(&[hi, c]));
+                            self.typed_text(&String::from_utf16_lossy(&[hi, c]));
                         }
                     } else if c >= 0x20 && c != 0x7F {
                         self.high_surrogate = None;
-                        self.search_insert(&String::from_utf16_lossy(&[c]));
+                        self.typed_text(&String::from_utf16_lossy(&[c]));
                     }
                 }
                 Some(LRESULT(0))
@@ -2437,6 +2651,9 @@ impl AppState {
                         86 if ctrl => self.paste_text(),
                         _ => {}
                     }
+                    return Some(LRESULT(0));
+                }
+                if self.field_key(key) {
                     return Some(LRESULT(0));
                 }
                 if key == 27 {
@@ -2464,7 +2681,9 @@ impl AppState {
             | WM_APP_DL_PROGRESS
             | WM_APP_DL_DONE
             | WM_APP_UPDATE_PROGRESS
-            | WM_APP_UPDATE_DONE => {
+            | WM_APP_UPDATE_DONE
+            | WM_APP_INSTALL_DONE
+            | WM_APP_SELFUPDATE => {
                 self.on_payload(msg, lparam);
                 Some(LRESULT(0))
             }
@@ -2574,6 +2793,8 @@ impl AppState {
                 self.on_update_progress(d, t)
             }
             (WM_APP_UPDATE_DONE, Payload::UpdateDone(r)) => self.on_update_done(r),
+            (WM_APP_INSTALL_DONE, Payload::InstallDone) => self.on_install_done(),
+            (WM_APP_SELFUPDATE, Payload::SelfUpdate(r)) => self.on_self_update(r),
             _ => {}
         }
     }

@@ -1,16 +1,20 @@
-//! WinHTTP transport. Uses the system TLS store and the system proxy settings,
-//! so no third-party TLS stack or proxy configuration is needed.
+//! WinHTTP transport. Uses the system TLS store and the Windows/Internet
+//! Explorer proxy settings — a static proxy, a PAC script or WPAD — so no
+//! third-party TLS stack or manual proxy configuration is needed.
 //!
 //! The store's download endpoint answers with a 302 to a plain-HTTP CDN host.
 //! WinHTTP refuses that downgrade by default, so redirects are handled here
 //! explicitly: status codes and Content-Length are checked, and identity
 //! headers are never forwarded to a redirect target.
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::io::Write;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use windows::Win32::Foundation::{GlobalFree, HGLOBAL};
 use windows::Win32::Networking::WinHttp::*;
-use windows::core::{HSTRING, PCWSTR};
+use windows::core::{HSTRING, PCWSTR, PWSTR};
 
 use crate::model::{self, App, BASE, CH, ClassGroup, Detail};
 
@@ -45,6 +49,200 @@ fn wide(s: &str) -> Vec<u16> {
 
 fn hs(s: &str) -> HSTRING {
     HSTRING::from(s)
+}
+
+/// Null-terminated UTF-16 buffer. WinHTTP's `PCWSTR` parameters need the
+/// terminator that [`wide`] deliberately leaves out (it feeds APIs that take an
+/// explicit character count).
+fn wstr0(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// How one request should reach the network, derived from the current user's
+/// Windows proxy settings.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum SessionProxy {
+    /// No proxy; connect straight to the host.
+    Direct,
+    /// Let WinHTTP run WPAD discovery (having no higher-priority setting).
+    Auto,
+    /// A fixed proxy: `host:port` or `http=h:p;https=h:p`.
+    Fixed {
+        proxy: String,
+        bypass: Option<String>,
+    },
+}
+
+/// Snapshot of the Internet Explorer / Windows proxy configuration.
+#[derive(Clone, Default)]
+struct IeProxy {
+    auto_detect: bool,
+    pac: Option<String>,
+    proxy: Option<String>,
+    bypass: Option<String>,
+}
+
+/// Re-read the system settings at most this often, so toggling the proxy in
+/// Windows Settings takes effect without restarting the app.
+const PROXY_TTL: Duration = Duration::from_secs(30);
+
+static IE_PROXY: OnceLock<Mutex<(Option<Instant>, IeProxy)>> = OnceLock::new();
+
+fn ie_proxy() -> IeProxy {
+    let cell = IE_PROXY.get_or_init(|| Mutex::new((None, IeProxy::default())));
+    let mut guard = match cell.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let (Some(at), cfg) = (&guard.0, &guard.1)
+        && at.elapsed() < PROXY_TTL
+    {
+        return cfg.clone();
+    }
+    let cfg = read_ie_proxy();
+    *guard = (Some(Instant::now()), cfg.clone());
+    cfg
+}
+
+fn read_ie_proxy() -> IeProxy {
+    unsafe {
+        let mut raw = WINHTTP_CURRENT_USER_IE_PROXY_CONFIG::default();
+        if WinHttpGetIEProxyConfigForCurrentUser(&mut raw).is_err() {
+            log("WARN read IE proxy config failed");
+            return IeProxy::default();
+        }
+        IeProxy {
+            auto_detect: raw.fAutoDetect.as_bool(),
+            pac: take_global_string(raw.lpszAutoConfigUrl),
+            proxy: take_global_string(raw.lpszProxy),
+            bypass: take_global_string(raw.lpszProxyBypass),
+        }
+    }
+}
+
+/// Copy one WinHTTP-allocated string, then free it with `GlobalFree` as the API
+/// contract requires. Leaking these buffers would add up over a session.
+unsafe fn take_global_string(p: PWSTR) -> Option<String> {
+    if p.is_null() {
+        return None;
+    }
+    let text = unsafe { p.to_string() }.ok();
+    let _ = unsafe { GlobalFree(Some(HGLOBAL(p.0 as *mut c_void))) };
+    text.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// PAC scripts answer with browser-style tokens (`PROXY host:port`,
+/// `DIRECT`, `SOCKS host:port`); WinHTTP wants the bare `host:port` list.
+/// `None` means "connect directly".
+fn normalize_pac_proxy(raw: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    for token in raw.split(';') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        // `DIRECT` carries no address, so it never splits into keyword + host.
+        if token.eq_ignore_ascii_case("DIRECT") {
+            return None;
+        }
+        let (kind, addr) = match token.split_once(char::is_whitespace) {
+            Some((k, a)) => (k.to_ascii_uppercase(), a.trim()),
+            None => ("PROXY".to_string(), token),
+        };
+        match kind.as_str() {
+            "DIRECT" => return None,
+            // WinHTTP cannot speak SOCKS, so such a script means "no proxy".
+            "PROXY" | "HTTP" | "HTTPS" if !addr.is_empty() => parts.push(addr),
+            _ => {}
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(";"))
+    }
+}
+
+/// Cached PAC decision per URL, with the moment it was resolved.
+type PacCache = Mutex<HashMap<String, (Instant, Option<String>)>>;
+
+/// PAC evaluation can take hundreds of milliseconds on a corporate network.
+/// Results are cached per URL for a minute; the URL set is small (a download
+/// plus its redirect targets), so a plain map with a size cap is enough.
+fn pac_proxy(url: &str, pac: &str) -> Option<String> {
+    static CACHE: OnceLock<PacCache> = OnceLock::new();
+    let cell = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(cache) = cell.lock()
+        && let Some((at, v)) = cache.get(url)
+        && at.elapsed() < Duration::from_secs(60)
+    {
+        return v.clone();
+    }
+    let resolved = resolve_pac(url, pac);
+    if let Ok(mut cache) = cell.lock() {
+        if cache.len() >= 128 {
+            cache.clear();
+        }
+        cache.insert(url.to_string(), (Instant::now(), resolved.clone()));
+    }
+    resolved
+}
+
+fn resolve_pac(url: &str, pac: &str) -> Option<String> {
+    unsafe {
+        let mut handles = Handles::new();
+        let session = handles
+            .add(WinHttpOpen(
+                &hs("AllStore/1.0"),
+                WINHTTP_ACCESS_TYPE_NO_PROXY,
+                PCWSTR::null(),
+                PCWSTR::null(),
+                0,
+            ))
+            .ok()?;
+        let pac_w = wstr0(pac);
+        let url_w = wstr0(url);
+        let mut opts = WINHTTP_AUTOPROXY_OPTIONS {
+            dwFlags: WINHTTP_AUTOPROXY_CONFIG_URL,
+            lpszAutoConfigUrl: PCWSTR(pac_w.as_ptr()),
+            fAutoLogonIfChallenged: true.into(),
+            ..Default::default()
+        };
+        let mut info = WINHTTP_PROXY_INFO::default();
+        if WinHttpGetProxyForUrl(session, PCWSTR(url_w.as_ptr()), &mut opts, &mut info).is_err() {
+            log("WARN PAC resolve failed, using direct connection");
+            return None;
+        }
+        let raw = take_global_string(info.lpszProxy);
+        let _ = take_global_string(info.lpszProxyBypass);
+        raw.and_then(|r| normalize_pac_proxy(&r))
+    }
+}
+
+fn session_proxy(url: &str) -> SessionProxy {
+    let cfg = ie_proxy();
+    // A manually configured proxy wins over auto-detection, exactly like
+    // WinINet's precedence rules.
+    if let Some(proxy) = cfg.proxy {
+        return SessionProxy::Fixed {
+            proxy,
+            bypass: cfg.bypass,
+        };
+    }
+    if let Some(pac) = cfg.pac {
+        return match pac_proxy(url, &pac) {
+            Some(proxy) => SessionProxy::Fixed {
+                proxy,
+                bypass: None,
+            },
+            None => SessionProxy::Direct,
+        };
+    }
+    if cfg.auto_detect {
+        SessionProxy::Auto
+    } else {
+        SessionProxy::Direct
+    }
 }
 
 #[derive(Clone)]
@@ -125,25 +323,43 @@ fn resolve_location(base: &str, loc: &str) -> String {
 }
 
 /// Close every WinHTTP handle even when an early `?` returns.
-struct Handles(Vec<*mut c_void>);
+///
+/// Besides handles it owns the UTF-16 buffers that a session's proxy option
+/// points at: WinHTTP does not copy those strings, so they must stay alive
+/// until the handle is closed. Field order guarantees that: `Drop` runs before
+/// the fields are freed.
+struct Handles {
+    handles: Vec<*mut c_void>,
+    strings: Vec<Vec<u16>>,
+}
 
 impl Handles {
     fn new() -> Self {
-        Self(Vec::with_capacity(3))
+        Self {
+            handles: Vec::with_capacity(3),
+            strings: Vec::new(),
+        }
     }
     fn add(&mut self, h: *mut c_void) -> Result<*mut c_void, String> {
         if h.is_null() {
             return Err("WinHTTP 句柄创建失败".into());
         }
-        self.0.push(h);
+        self.handles.push(h);
         Ok(h)
+    }
+    /// Keep `s` alive as a NUL-terminated string for the handles' lifetime.
+    fn keep(&mut self, s: &str) -> *const u16 {
+        let buf = wstr0(s);
+        let ptr = buf.as_ptr();
+        self.strings.push(buf);
+        ptr
     }
 }
 
 impl Drop for Handles {
     fn drop(&mut self) {
         unsafe {
-            for &h in self.0.iter().rev() {
+            for &h in self.handles.iter().rev() {
                 WinHttpCloseHandle(h).ok();
             }
         }
@@ -252,29 +468,82 @@ pub(crate) fn friendly_transport_code(code: u32) -> String {
     format!("{}（0x{:08X}）", what, code)
 }
 
-/// A single HTTP round trip. Redirect bodies are discarded; only a final 2xx
-/// response is streamed into `sink`.
-fn one(
+/// Status codes that mean "the proxy itself is the problem" rather than the
+/// origin server: authentication required, or the proxy could not reach
+/// upstream. Such a response is retried once over a direct connection.
+fn proxy_rejected(status: u32) -> bool {
+    matches!(status, 407 | 502 | 504)
+}
+
+/// Install the session proxy. `Auto` is expressed through `WinHttpOpen`, which
+/// is the only place `WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` is accepted.
+unsafe fn apply_proxy(session: *mut c_void, route: &SessionProxy, handles: &mut Handles) {
+    let info = match route {
+        SessionProxy::Direct | SessionProxy::Auto => WINHTTP_PROXY_INFO {
+            dwAccessType: WINHTTP_ACCESS_TYPE_NO_PROXY,
+            ..Default::default()
+        },
+        SessionProxy::Fixed { proxy, bypass } => {
+            let p = handles.keep(proxy) as *mut u16;
+            let b = bypass.as_deref().map(|v| handles.keep(v) as *mut u16);
+            WINHTTP_PROXY_INFO {
+                dwAccessType: WINHTTP_ACCESS_TYPE_NAMED_PROXY,
+                lpszProxy: PWSTR(p),
+                lpszProxyBypass: b.map(PWSTR).unwrap_or_default(),
+            }
+        }
+    };
+    // WinHttpSetOption wants the raw structure bytes, not a Rust reference.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            &info as *const WINHTTP_PROXY_INFO as *const u8,
+            std::mem::size_of::<WINHTTP_PROXY_INFO>(),
+        )
+    };
+    if WinHttpSetOption(
+        Some(session as *const c_void),
+        WINHTTP_OPTION_PROXY,
+        Some(bytes),
+    )
+    .is_err()
+    {
+        log("WARN apply proxy setting failed");
+    }
+}
+
+/// One attempt over an explicit route. `wrote` is flipped as soon as body
+/// bytes reach the sink, which makes a retry unsafe (it would duplicate data).
+/// The argument list mirrors [`one`] plus the route and that flag; splitting it
+/// into a struct would only add indirection.
+#[allow(clippy::too_many_arguments)]
+fn one_attempt(
     method: &str,
     url: &str,
     headers: &[(&str, String)],
-    // Headers safe to forward on *every* redirect hop (currently Range).
-    // `headers` above are identity headers and stay on hop 0 only.
     carry: &[(&str, String)],
     body: Option<&[u8]>,
     sink: &mut Sink<'_>,
     meta: &mut MetaSink<'_>,
+    route: &SessionProxy,
+    wrote: &mut bool,
 ) -> Result<OneResp, String> {
     unsafe {
         let u = split_url(url)?;
         let mut handles = Handles::new();
+        let access = match route {
+            SessionProxy::Auto => WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            _ => WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        };
         let session = handles.add(WinHttpOpen(
             &hs("AllStore/1.0"),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            access,
             PCWSTR::null(),
             PCWSTR::null(),
             0,
         ))?;
+        if !matches!(route, SessionProxy::Auto) {
+            apply_proxy(session, route, &mut handles);
+        }
         let connect = handles.add(WinHttpConnect(session, &hs(&u.host), u.port, 0))?;
         let flags = if u.secure {
             WINHTTP_FLAG_SECURE
@@ -378,6 +647,9 @@ fn one(
             }
             total += buf.len() as u64;
             if success && let Some(f) = sink.as_mut() {
+                // From here on the caller owns bytes, so a retry would append
+                // a second copy of the file.
+                *wrote = true;
                 if !f(&buf) {
                     return Err("下载被中止".into());
                 }
@@ -400,6 +672,67 @@ fn one(
     }
 }
 
+/// A single HTTP round trip. Redirect bodies are discarded; only a final 2xx
+/// response is streamed into `sink`.
+///
+/// The request goes through whatever proxy the user configured in Windows. A
+/// broken or misdetected proxy is the most common reason for "this app has no
+/// internet" on a corporate network, so one direct retry is made when the
+/// proxy fails before any body bytes were delivered.
+fn one(
+    method: &str,
+    url: &str,
+    headers: &[(&str, String)],
+    // Headers safe to forward on *every* redirect hop (currently Range).
+    // `headers` above are identity headers and stay on hop 0 only.
+    carry: &[(&str, String)],
+    body: Option<&[u8]>,
+    sink: &mut Sink<'_>,
+    meta: &mut MetaSink<'_>,
+) -> Result<OneResp, String> {
+    let route = session_proxy(url);
+    if route == SessionProxy::Direct {
+        let mut wrote = false;
+        return one_attempt(
+            method, url, headers, carry, body, sink, meta, &route, &mut wrote,
+        );
+    }
+    let mut wrote = false;
+    let first = one_attempt(
+        method, url, headers, carry, body, sink, meta, &route, &mut wrote,
+    );
+    let retryable = match &first {
+        Ok(r) => proxy_rejected(r.status),
+        // A transport failure after body bytes arrived is the origin's fault.
+        Err(_) => !wrote,
+    };
+    if !retryable {
+        return first;
+    }
+    let host = split_url(url).map(|u| u.host).unwrap_or_default();
+    match &first {
+        Ok(r) => log(&format!("PROXY HTTP {} {} -> retry direct", r.status, host)),
+        Err(e) => log(&format!("PROXY failed {} ({}) -> retry direct", host, e)),
+    }
+    let mut wrote = false;
+    match one_attempt(
+        method,
+        url,
+        headers,
+        carry,
+        body,
+        sink,
+        meta,
+        &SessionProxy::Direct,
+        &mut wrote,
+    ) {
+        Ok(r) => Ok(r),
+        // Keep the proxy-side error: "代理需要身份验证" tells the user far
+        // more than the timeout a dead direct route produces.
+        Err(_) => first,
+    }
+}
+
 /// Turn a failed HTTP attempt into a line a user can act on. CDN error bodies
 /// are JSON blobs (`{"errorcode":-46628,...}`) that mean nothing in a list row,
 /// so they are dropped in favour of a short explanation. The status code stays
@@ -408,6 +741,7 @@ pub(crate) fn friendly_http_error(status: u32, body: &[u8]) -> String {
     let base = match status {
         404 | 410 => format!("下载地址已失效（HTTP {}）", status),
         403 => "下载被拒绝（HTTP 403），该地址可能需要登录或限制地区".to_string(),
+        407 => "系统代理要求身份验证（HTTP 407），请检查 Windows 代理设置".to_string(),
         429 => "请求过于频繁（HTTP 429），请稍后重试".to_string(),
         500..=599 => format!("下载服务器暂时不可用（HTTP {}）", status),
         400..=499 => format!("下载请求被拒绝（HTTP {}）", status),
@@ -775,6 +1109,42 @@ mod tests {
         assert_eq!(parse_content_range("bytes 0-99/*"), None);
         assert_eq!(parse_content_range("garbage"), None);
         assert_eq!(parse_content_range("bytes /100"), None);
+    }
+
+    #[test]
+    fn normalizes_pac_proxy_tokens() {
+        // Chrome-style PAC output -> the bare list WinHTTP accepts.
+        assert_eq!(
+            normalize_pac_proxy("PROXY proxy.corp:8080"),
+            Some("proxy.corp:8080".into())
+        );
+        assert_eq!(
+            normalize_pac_proxy(" PROXY a.corp:80 ; PROXY b.corp:80 "),
+            Some("a.corp:80;b.corp:80".into())
+        );
+        assert_eq!(
+            normalize_pac_proxy("HTTPS secure.corp:443"),
+            Some("secure.corp:443".into())
+        );
+        // A bare host:port (some scripts omit the scheme keyword).
+        assert_eq!(
+            normalize_pac_proxy("proxy.corp:3128"),
+            Some("proxy.corp:3128".into())
+        );
+        // "DIRECT" and schemes WinHTTP cannot speak mean "no proxy".
+        assert_eq!(normalize_pac_proxy("DIRECT"), None);
+        assert_eq!(normalize_pac_proxy("SOCKS socks.corp:1080"), None);
+        assert_eq!(normalize_pac_proxy(""), None);
+    }
+
+    #[test]
+    fn proxy_failures_are_worth_a_direct_retry() {
+        assert!(proxy_rejected(407));
+        assert!(proxy_rejected(502));
+        assert!(proxy_rejected(504));
+        // A dead CDN object is not a proxy problem.
+        assert!(!proxy_rejected(404));
+        assert!(!proxy_rejected(200));
     }
 
     #[test]

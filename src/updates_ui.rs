@@ -1,7 +1,7 @@
 //! The "software updates" page: layout, interaction and a hardened downloader
 //! shared by normal installs and updates.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -9,13 +9,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
+use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+use windows::core::HSTRING;
 
 use crate::app::{
     AppState, BTN_H, GAP, HIT_ALL, HIT_CHECK, HIT_IGNORED_ALL, HIT_IGNORED_LIST,
     HIT_IGNORED_RESTORE, HIT_ROW, HIT_ROW_IGNORE, HIT_ROW_UPDATE, Mode, NAV_W, PAD, Payload, ROW_H,
     STATUS_H, TOP_H, WM_APP_UPDATE_DONE, WM_APP_UPDATE_PROGRESS, draw_button, in_rect, post,
 };
-use crate::downloads::{DlState, Progress};
+use crate::downloads::{DlState, Progress, fmt_size};
 use crate::gfx;
 use crate::installed::{self, Installed, Inventory};
 use crate::net;
@@ -95,6 +97,10 @@ fn temp_dir() -> std::path::PathBuf {
     p
 }
 
+fn tmp_dir_string() -> String {
+    temp_dir().to_string_lossy().to_string()
+}
+
 /// Stable, content-derived key for a partial download. The same app+URL maps
 /// to the same file across restarts, so an interrupted transfer can resume.
 /// FNV-1a 64-bit: dependency-free and deterministic.
@@ -149,6 +155,42 @@ pub(crate) fn cleanup_temp(live: &[String]) {
     }
 }
 
+/// Headroom kept free on top of the package size. Windows itself, the page
+/// file and other apps need room while a multi-hundred-MB installer lands.
+const DISK_HEADROOM: u64 = 64 * 1024 * 1024;
+
+/// Bytes available to this user on the volume that holds `dir`. `None` when
+/// the path does not exist (yet) or the query fails, in which case the
+/// download proceeds and a real write error reports the problem.
+fn free_space(dir: &str) -> Option<u64> {
+    let wide = HSTRING::from(dir);
+    let mut free = 0u64;
+    let mut total = 0u64;
+    let mut free_total = 0u64;
+    unsafe {
+        GetDiskFreeSpaceExW(
+            &wide,
+            Some(&mut free),
+            Some(&mut total),
+            Some(&mut free_total),
+        )
+        .ok()?;
+    }
+    Some(free)
+}
+
+/// Uppercased drive prefix (`C:`), used to tell a same-volume rename (free)
+/// from a cross-volume copy (which needs room at the destination).
+fn volume_of(path: &str) -> Option<String> {
+    let mut chars = path.chars();
+    let letter = chars.next()?.to_ascii_uppercase();
+    if chars.next()? == ':' {
+        Some(format!("{}:", letter))
+    } else {
+        None
+    }
+}
+
 /// rename() fails across volumes; copy is the portable fallback.
 fn persist(tmp: &str, path: &str) -> Result<(), String> {
     match std::fs::rename(tmp, path) {
@@ -164,17 +206,36 @@ fn persist(tmp: &str, path: &str) -> Result<(), String> {
 /// Reject HTML error pages / gateway interstitials that would otherwise be
 /// saved as a plausible-looking `.exe`.
 fn looks_like_package(file: &mut File, ext: &str) -> bool {
-    let mut head = [0u8; 4];
-    if file.read_exact(&mut head).is_err() {
+    let mut buf = [0u8; 1024];
+    let Ok(n) = file.read(&mut buf) else {
+        return false;
+    };
+    let head = &buf[..n];
+    if head.len() < 4 {
         return false;
     }
     match ext {
-        ".exe" => head[0] == b'M' && head[1] == b'Z',
-        ".msi" => head == [0xD0, 0xCF, 0x11, 0xE0],
-        ".zip" | ".apk" => head[0] == b'P' && head[1] == b'K',
-        ".7z" => head[0] == b'7' && head[1] == b'z',
+        ".exe" => head[0] == b'M' && head[1] == b'Z' && pe_signature_ok(head),
+        ".msi" => head.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]),
+        ".zip" | ".apk" => head.starts_with(b"PK"),
+        ".7z" => head.starts_with(b"7z"),
         _ => true,
     }
+}
+
+/// A real executable carries `e_lfanew` at 0x3C pointing at a `PE\0\0`
+/// signature. An HTML page that happens to start with "MZ" fails this check.
+fn pe_signature_ok(head: &[u8]) -> bool {
+    if head.len() < 0x40 {
+        return false;
+    }
+    let off = u32::from_le_bytes([head[0x3C], head[0x3D], head[0x3E], head[0x3F]]) as usize;
+    if off + 4 > head.len() {
+        // The DOS stub is longer than the sampled window; "MZ" is the best we
+        // can do without seeking, and it is already a strong signal.
+        return true;
+    }
+    &head[off..off + 4] == b"PE\0\0"
 }
 
 /// Stream a package to Downloads into a temporary `.part` file, then rename
@@ -199,12 +260,20 @@ pub(crate) fn download_package_ex(
     resume: bool,
 ) -> Result<String, String> {
     let safe = sanitize(name);
-    let dir = match std::env::var("USERPROFILE") {
-        Ok(p) => format!("{}\\Downloads", p),
-        Err(_) => ".".to_string(),
-    };
+    let dir = crate::source::load_settings().download_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建下载目录：{}", e))?;
     let tmp = part_path(name, url).to_string_lossy().to_string();
+    // A nearly full disk fails in the middle of a large installer, after the
+    // user has waited. Refuse to start when even the staging area cannot hold
+    // the package plus headroom.
+    if let Some(free) = free_space(&tmp_dir_string())
+        && free < DISK_HEADROOM
+    {
+        return Err(format!(
+            "磁盘空间不足：临时目录只剩 {}，请清理后重试",
+            fmt_size(free)
+        ));
+    }
     // Existing bytes are the resume offset. A brand-new download starts at 0.
     let existing = if resume { partial_bytes(name, url) } else { 0 };
 
@@ -239,6 +308,10 @@ pub(crate) fn download_package_ex(
     let need_reset = Cell::new(false);
     let total_hint = Cell::new(0u64);
     let started = Cell::new(false);
+    // Filled by the header callback once the real package size is known. The
+    // body is then refused before the disk fills up, instead of failing on a
+    // raw "os error 112" halfway through.
+    let space_error: RefCell<Option<String>> = RefCell::new(None);
 
     let fetch = {
         let mut meta = |size: u64, partial: bool| {
@@ -248,6 +321,16 @@ pub(crate) fn download_package_ex(
             }
             if size > 0 {
                 progress.borrow_mut().set_total(size);
+                let need = size.saturating_sub(existing).saturating_add(DISK_HEADROOM);
+                if let Some(free) = free_space(&tmp_dir_string())
+                    && free < need
+                {
+                    *space_error.borrow_mut() = Some(format!(
+                        "磁盘空间不足：下载需要 {}，当前可用 {}，请清理后继续",
+                        fmt_size(need),
+                        fmt_size(free)
+                    ));
+                }
             }
         };
         let mut sink = |chunk: &[u8]| -> bool {
@@ -258,7 +341,7 @@ pub(crate) fn download_package_ex(
             if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
                 return false;
             }
-            if write_error.is_some() {
+            if write_error.is_some() || space_error.borrow().is_some() {
                 return false;
             }
             if !started.replace(true) && need_reset.get() {
@@ -292,13 +375,20 @@ pub(crate) fn download_package_ex(
     let _ = file.flush();
     drop(file);
 
-    let outcome = finalize(&fetch, total, write_error, &tmp, &dir, &safe, name);
+    let outcome = match space_error.into_inner() {
+        Some(msg) => Err(msg),
+        None => finalize(&fetch, total, write_error, &tmp, &dir, &safe, name),
+    };
     if let Err(e) = &outcome {
-        // Keep the partial on a cancellation or transport error so the next
-        // "继续" can resume from these bytes. Discard it only when the bytes
-        // themselves are invalid (signature/size mismatch), which would make
-        // every later resume fail on the same corrupt tail.
-        let recoverable = e.contains("中止") || e.contains("失败：") || e.contains("HTTP");
+        // Keep the partial on a cancellation, transport error or a full disk so
+        // the next "继续" can resume from these bytes. Discard it only when the
+        // bytes themselves are invalid (signature/size mismatch), which would
+        // make every later resume fail on the same corrupt tail.
+        let recoverable = e.contains("中止")
+            || e.contains("失败：")
+            || e.contains("HTTP")
+            || e.contains("空间不足")
+            || e.contains("写盘失败");
         if !recoverable {
             let _ = std::fs::remove_file(&tmp);
         }
@@ -334,6 +424,27 @@ fn finalize(
         return Err("下载内容不是有效的安装包（可能被网络拦截）".into());
     }
     drop(probe);
+    // The download only proves the *stream* was complete; check what actually
+    // landed on disk before handing the path to the installer.
+    let on_disk = std::fs::metadata(tmp).map(|m| m.len()).unwrap_or(0);
+    if on_disk == 0 || (meta.total > 0 && on_disk != meta.total) {
+        return Err(format!(
+            "安装包不完整：应为 {} 字节，已写入 {} 字节",
+            meta.total, on_disk
+        ));
+    }
+    // A rename is free, but a Downloads folder on another volume needs a full
+    // second copy of the package.
+    if volume_of(dir) != volume_of(tmp)
+        && let Some(free) = free_space(dir)
+        && free < on_disk
+    {
+        return Err(format!(
+            "下载目录空间不足：需要 {}，当前可用 {}",
+            fmt_size(on_disk),
+            fmt_size(free)
+        ));
+    }
     let path = unique_path(dir, safe, &ext);
     persist(tmp, &path)?;
     net::log(&format!(
@@ -382,6 +493,19 @@ impl AppState {
     /// Returns true when the visible update list actually changed.
     pub(crate) fn refresh_updates_local(&mut self) -> bool {
         self.set_local_snapshot(installed::scan())
+    }
+
+    /// The installer launched from the downloads page has exited. Rescanning
+    /// now sees the newly written uninstall keys, so the app disappears from
+    /// the update list instead of being offered again.
+    pub(crate) fn on_install_done(&mut self) {
+        let changed = self.refresh_updates_local();
+        self.status = if changed {
+            "安装完成  ·  已刷新本机已安装软件".to_string()
+        } else {
+            "安装程序已退出  ·  已刷新本机已安装软件".to_string()
+        };
+        self.invalidate();
     }
 
     fn set_local_snapshot(&mut self, snap: Vec<Installed>) -> bool {
@@ -923,7 +1047,7 @@ impl AppState {
         self.status = format!(
             "已加入下载队列：{} 个更新包  ·  最多 {} 个并行",
             n,
-            crate::downloads::MAX_CONCURRENT
+            crate::downloads::max_concurrent()
         );
         self.invalidate();
     }
@@ -1027,6 +1151,33 @@ mod tests {
         assert_eq!(extension_of("http://cdn/x/app.msi?token=abc"), ".msi");
         assert_eq!(extension_of("http://cdn/x/a.zip"), ".zip");
         assert_eq!(extension_of("http://cdn/x/download?softid=1"), ".exe");
+    }
+
+    #[test]
+    fn pe_signature_rejects_renamed_html() {
+        let mut page = vec![0u8; 0x200];
+        page[..2].copy_from_slice(b"MZ"); // an HTML page cannot fake the PE stub
+        assert!(!pe_signature_ok(&page));
+
+        let mut exe = vec![0u8; 0x200];
+        exe[..2].copy_from_slice(b"MZ");
+        exe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        exe[0x80..0x84].copy_from_slice(b"PE\0\0");
+        assert!(pe_signature_ok(&exe));
+
+        // A DOS stub longer than the sampled window cannot be checked further.
+        let mut long_stub = vec![0u8; 0x40];
+        long_stub[..2].copy_from_slice(b"MZ");
+        long_stub[0x3C..0x40].copy_from_slice(&0x4000u32.to_le_bytes());
+        assert!(pe_signature_ok(&long_stub));
+        assert!(!pe_signature_ok(b"M"));
+    }
+
+    #[test]
+    fn volume_prefixes_decide_whether_a_copy_is_needed() {
+        assert_eq!(volume_of(r"C:\Users\x\Downloads"), Some("C:".into()));
+        assert_eq!(volume_of(r"d:\Downloads"), Some("D:".into()));
+        assert_eq!(volume_of(r"\\?\C:\Temp"), None);
     }
 
     /// Regression for "the progress bar has no denominator": Content-Length

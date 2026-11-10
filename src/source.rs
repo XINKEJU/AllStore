@@ -58,15 +58,69 @@ pub struct CustomSource {
     pub url: String,
 }
 
-/// User-editable source configuration. Absent file = both built-in sources on.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    /// Follow the Windows "app mode" setting (default).
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+/// User-editable configuration. Absent file = every built-in source on and
+/// every option at its default.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     /// Display names to switch off (`联想`, `腾讯`, or a custom source name).
     #[serde(default)]
     pub disabled: Vec<String>,
     #[serde(default)]
     pub custom: Vec<CustomSource>,
+    #[serde(default)]
+    pub theme: Theme,
+    /// Empty = `%USERPROFILE%\Downloads`.
+    #[serde(default)]
+    pub download_dir: String,
+    /// 0 = built-in default (3).
+    #[serde(default)]
+    pub max_concurrent: usize,
 }
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            disabled: Vec::new(),
+            custom: Vec::new(),
+            theme: Theme::System,
+            download_dir: String::new(),
+            max_concurrent: 0,
+        }
+    }
+}
+
+impl Settings {
+    /// Concurrency actually used by the download queue. Kept inside what the
+    /// UI offers so a hand-edited file cannot open a hundred sockets.
+    pub fn concurrency(&self) -> usize {
+        match self.max_concurrent {
+            0 => DEFAULT_CONCURRENT,
+            n => n.clamp(1, 6),
+        }
+    }
+
+    /// Download folder, falling back to the standard Downloads directory.
+    pub fn download_dir(&self) -> String {
+        if !self.download_dir.trim().is_empty() {
+            return self.download_dir.trim().to_string();
+        }
+        std::env::var("USERPROFILE")
+            .map(|p| format!("{}\\Downloads", p))
+            .unwrap_or_else(|_| ".".into())
+    }
+}
+
+pub const DEFAULT_CONCURRENT: usize = 3;
 
 /// HEAD-probe verdicts, so a launch costs nothing after the first check.
 /// The Tencent list API keeps returning links to files its CDN already
@@ -432,6 +486,26 @@ pub fn load_settings() -> Settings {
         .ok()
         .and_then(|s| serde_json::from_str::<Settings>(&s).ok())
         .unwrap_or_default()
+}
+
+/// Persist settings. Written to a sibling temp file first so a crash or a
+/// full disk cannot leave a truncated JSON behind (which would silently reset
+/// the user's whole configuration on the next launch).
+pub fn save_settings(settings: &Settings) -> Result<(), String> {
+    let Some(path) = settings_path() else {
+        return Err("无法定位配置目录".into());
+    };
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("无法创建配置目录：{}", e))?;
+    }
+    let json =
+        serde_json::to_string_pretty(settings).map_err(|e| format!("配置序列化失败：{}", e))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| format!("写入配置失败：{}", e))?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("保存配置失败：{}", e)
+    })
 }
 
 pub struct Catalog {

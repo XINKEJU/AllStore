@@ -5,15 +5,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
-use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+use windows::Win32::UI::Shell::{
+    SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::app::{
     AppState, GAP, HIT_DL_CANCEL, HIT_DL_CLEAR, HIT_DL_INSTALL, HIT_DL_OPEN, HIT_DL_PAUSE,
     HIT_DL_REMOVE, HIT_DL_RETRY, NAV_W, PAD, Payload, STATUS_H, TOP_H, WM_APP_DL_DONE,
-    WM_APP_DL_PROGRESS, WM_APP_FALLBACK, draw_button, in_rect, post,
+    WM_APP_DL_PROGRESS, WM_APP_FALLBACK, WM_APP_INSTALL_DONE, draw_button, in_rect, post,
 };
 use crate::gfx::{self, Color, Gfx, Palette};
 use crate::net;
@@ -77,9 +81,22 @@ pub(crate) fn link_retryable(already_failed_over: bool, url: &str, err: &str) ->
 }
 
 pub(crate) const DL_ROW_H: f32 = 100.0;
-/// How many transfers may hold a slot at once. Three keeps a fast line busy
-/// without opening a dozen sockets for a batch of updates.
+/// How many transfers may hold a slot at once by default. Three keeps a fast
+/// line busy without opening a dozen sockets for a batch of updates. The user
+/// can change it on the settings page.
 pub(crate) const MAX_CONCURRENT: usize = 3;
+static CONCURRENCY: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(MAX_CONCURRENT);
+
+pub(crate) fn max_concurrent() -> usize {
+    CONCURRENCY.load(Ordering::Relaxed)
+}
+
+/// Applied when settings load or the user picks another value. Clamped so a
+/// hand-edited config cannot flood the network or stall the queue.
+pub(crate) fn set_max_concurrent(n: usize) {
+    CONCURRENCY.store(n.clamp(1, 6), Ordering::Relaxed);
+}
 /// Automatic retries per task after a transport failure (2 s, 4 s backoff).
 const MAX_RETRIES: u32 = 2;
 /// One sample every 500 ms -> a 36 second rolling window.
@@ -350,37 +367,44 @@ pub fn open_folder(path: &str) {
         .spawn();
 }
 
-/// Launch a downloaded package through the shell. `ShellExecuteW("open")`
-/// respects the file association and, unlike `CreateProcess`, honours the
-/// installer's manifest: a package that requests elevation triggers the normal
-/// UAC prompt, `.msi` goes through msiexec, and archives open in Explorer.
+/// Launch a downloaded package through the shell. `ShellExecuteExW` respects
+/// the file association and, unlike `CreateProcess`, honours the installer's
+/// manifest: a package that requests elevation triggers the normal UAC prompt,
+/// `.msi` goes through msiexec, and archives open in Explorer.
 ///
-/// Returns `Ok(())` when the shell accepted the request (the installer has been
-/// *started*, not silently installed), or a human-readable error. Only paths
-/// produced by our own verified downloader reach this function.
-pub fn run_installer(path: &str) -> Result<(), String> {
+/// `SEE_MASK_NOCLOSEPROCESS` is requested so the caller can wait for the
+/// installer to actually finish before rescanning the uninstall registry —
+/// a scan right after launch would still see the old version. The handle is
+/// `None` when the shell handed the file to an already-running process (DDE)
+/// and there is nothing to wait on.
+///
+/// Only paths produced by our own verified downloader reach this function.
+pub fn run_installer(path: &str) -> Result<Option<HANDLE>, String> {
     if path.is_empty() || !std::path::Path::new(path).is_file() {
         return Err("安装包文件不存在，可能已被移动或删除".into());
     }
     let file = HSTRING::from(path);
-    let exe = w!("open");
-    // ShellExecuteW returns an HINSTANCE whose numeric value > 32 means
-    // success; values <= 32 are Win32 error codes (it does not use HRESULT).
-    let ret = unsafe {
-        ShellExecuteW(
-            None,
-            exe,
-            &file,
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        )
+    let verb = w!("open");
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
     };
-    let code = ret.0 as isize;
-    if code > 32 {
-        Ok(())
+    // A failed call leaves `hInstApp` holding the legacy ShellExecute error
+    // code, which is what `shell_error` translates.
+    unsafe {
+        if ShellExecuteExW(&mut info).is_err() {
+            let code = info.hInstApp.0 as isize;
+            return Err(shell_error(if code > 0 { code } else { 31 }));
+        }
+    }
+    if info.hProcess.is_invalid() {
+        Ok(None)
     } else {
-        Err(shell_error(code))
+        Ok(Some(info.hProcess))
     }
 }
 
@@ -420,10 +444,29 @@ impl AppState {
             .map(run_installer)
             .unwrap_or_else(|| Err("安装包路径已丢失".into()));
         self.status = match result {
-            Ok(()) => format!(
-                "已启动 {} 的安装程序  ·  请按系统提示完成安装，完成后列表会自动刷新",
-                name
-            ),
+            Ok(process) => {
+                // Rescan only once the installer has exited: a scan now would
+                // still read the old version from the uninstall keys, and the
+                // user would keep seeing the same update listed.
+                let hwnd = self.hwnd_usize();
+                // `HANDLE` is a raw pointer and not `Send`, so carry it as an
+                // integer into the waiter thread.
+                let raw = process.map(|h| h.0 as usize);
+                std::thread::spawn(move || {
+                    match raw {
+                        Some(p) => unsafe {
+                            let handle = HANDLE(p as *mut std::ffi::c_void);
+                            WaitForSingleObject(handle, INFINITE);
+                            let _ = CloseHandle(handle);
+                        },
+                        // The shell used DDE and gave us no process to watch.
+                        // Give the installer time to finish, then rescan once.
+                        None => std::thread::sleep(std::time::Duration::from_secs(30)),
+                    }
+                    post(hwnd, WM_APP_INSTALL_DONE, Payload::InstallDone);
+                });
+                format!("已启动 {} 的安装程序  ·  安装完成后会自动刷新列表", name)
+            }
             Err(e) => format!("无法启动 {} 的安装程序：{}", name, e),
         };
         self.invalidate();
@@ -503,7 +546,7 @@ impl AppState {
     /// Start queued tasks while there is a free slot. Called after queueing,
     /// after a task finishes and after a pause frees its slot.
     pub(crate) fn pump(&mut self) {
-        while self.running_count() < MAX_CONCURRENT {
+        while self.running_count() < max_concurrent() {
             let Some(id) = self
                 .downloads
                 .iter()

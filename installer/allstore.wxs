@@ -65,12 +65,17 @@
                     Directory="ProgramMenuFolder"
                     Name="AllStore"
                     Description="AllStore — 原生 Windows 软件商店"
-                    WorkingDirectory="INSTALLFOLDER" />
+                    WorkingDirectory="INSTALLFOLDER">
+            <!-- Toasts from an unpackaged app need this on a Start shortcut. -->
+            <ShortcutProperty Key="System.AppUserModel.ID" Value="XINKEJU.AllStore" />
+          </Shortcut>
           <Shortcut Id="DesktopShortcut"
                     Directory="DesktopFolder"
                     Name="AllStore"
                     Description="AllStore — 原生 Windows 软件商店"
-                    WorkingDirectory="INSTALLFOLDER" />
+                    WorkingDirectory="INSTALLFOLDER">
+            <ShortcutProperty Key="System.AppUserModel.ID" Value="XINKEJU.AllStore" />
+          </Shortcut>
         </File>
         <!-- Per-user components must key off HKCU, not the file (ICE38/ICE43). -->
         <RegistryValue Id="InstallDirKey"

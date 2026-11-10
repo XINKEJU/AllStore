@@ -11,7 +11,7 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::core::{Interface, PCWSTR, w};
+use windows::core::{Interface, w};
 use windows_numerics::Vector2;
 
 #[derive(Clone, Copy)]
@@ -184,7 +184,6 @@ impl LayoutKey {
     }
 }
 
-#[allow(dead_code)]
 pub struct Gfx {
     // Kept alive so the D2D factory COM object is not released early.
     pub factory: ID2D1Factory,
@@ -328,6 +327,28 @@ impl Gfx {
             self.dpi = dpi_x;
             self.scale = dpi_x / 96.0;
             self.layouts.clear();
+        }
+    }
+
+    pub fn is_dark(&self) -> bool {
+        self.dark
+    }
+
+    /// Swap palettes when Windows switches between light and dark mode. The
+    /// render target stays alive; only the cached solid brushes are rebuilt.
+    pub fn set_dark(&mut self, dark: bool) {
+        if self.dark == dark {
+            return;
+        }
+        self.dark = dark;
+        self.pal = palette(dark);
+        self.brushes.clear();
+        for c in self.pal.all() {
+            unsafe {
+                if let Ok(b) = self.rt.CreateSolidColorBrush(&c.d2(), None) {
+                    self.brushes.insert(c.key(), b);
+                }
+            }
         }
     }
 
@@ -750,9 +771,4 @@ pub fn system_dark() -> bool {
         let _ = RegCloseKey(key);
         r.is_ok() && data == 0
     }
-}
-
-#[allow(dead_code)]
-fn _pcwstr_marker() -> PCWSTR {
-    PCWSTR::null()
 }

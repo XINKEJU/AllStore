@@ -11,13 +11,18 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
+use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient, ValidateRect};
+use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
+use windows::Win32::UI::Shell::ITaskbarList3;
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::GUID;
 
 use crate::catcache;
 use crate::downloads::{self, DlState, DlTask};
 use crate::gfx::{self, Gfx, Palette};
+use crate::iconcache;
 use crate::installed::{InstalledApp, Inventory};
 use crate::library;
 use crate::model::{App, ClassGroup, Detail, html_to_text};
@@ -42,6 +47,10 @@ pub const TIMER_ID: usize = 1;
 /// its progress line ("后台刷新" instead of "正在聚合"), which is the truth
 /// when the user is already looking at real cards.
 static CACHE_WARM: AtomicBool = AtomicBool::new(false);
+
+/// The windows crate no longer exports this CLSID constant; the value is
+/// stable since Windows 7 ({56FDF344-FD6D-11D0-958A-006097C9A090}).
+const CLSID_TASKBARLIST: GUID = GUID::from_u128(0x56fdf344_fd6d_11d0_958a_006097c9a090);
 
 // Design tokens: one grid for every screen.
 pub(crate) const NAV_W: f32 = 200.0;
@@ -241,6 +250,11 @@ pub struct AppState {
     list_epoch: u64,
     detail_epoch: u64,
     pending_icons: HashSet<String>,
+    /// Throttle for scroll-triggered icon fetching (see `WM_MOUSEWHEEL`).
+    last_icon_queue: Instant,
+    /// Taskbar overlay progress for the download queue (ITaskbarList3).
+    /// None when COM init failed — progress then lives only in the window.
+    pub(crate) taskbar: Option<ITaskbarList3>,
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +385,12 @@ impl AppState {
             list_epoch: 0,
             detail_epoch: 0,
             pending_icons: HashSet::new(),
+            last_icon_queue: Instant::now(),
+            taskbar: unsafe {
+                CoCreateInstance::<_, ITaskbarList3>(&CLSID_TASKBARLIST, None, CLSCTX_ALL)
+                    .ok()
+                    .and_then(|t| t.HrInit().ok().map(|_| t))
+            },
         };
         // Restore the durable download queue BEFORE cleaning the temp folder,
         // so partials belonging to live tasks are kept and can be resumed.
@@ -612,8 +632,17 @@ impl AppState {
                 loop {
                     let next = q.lock().ok().and_then(|mut g| g.pop_front());
                     let Some(url) = next else { break };
-                    // An empty result still posts, so a failed icon can be retried.
-                    let bytes = net::fetch_binary(&url).unwrap_or_default();
+                    // Disk first: a remembered answer costs zero network. Only
+                    // true misses fetch, and a failed fetch is not cached, so
+                    // the next launch retries it.
+                    let bytes = match iconcache::read(&url) {
+                        Some(bytes) => bytes,
+                        None => {
+                            let bytes = net::fetch_binary(&url).unwrap_or_default();
+                            iconcache::write(&url, &bytes);
+                            bytes
+                        }
+                    };
                     post(h, WM_APP_ICON, Payload::Icon { key: url, bytes });
                 }
             });
@@ -2276,6 +2305,27 @@ impl AppState {
                 }
                 None
             }
+            WM_SETTINGCHANGE => {
+                // Windows 11 lets the user flip the app theme from Settings
+                // while we are running. Follow it instead of asking for a
+                // restart; the registry read is cheap and only applied when
+                // the value actually changed.
+                let dark = gfx::system_dark();
+                if dark != self.gfx.is_dark() {
+                    self.gfx.set_dark(dark);
+                    let value: i32 = if dark { 1 } else { 0 };
+                    unsafe {
+                        let _ = DwmSetWindowAttribute(
+                            self.hwnd,
+                            DWMWINDOWATTRIBUTE(20),
+                            &value as *const i32 as *const c_void,
+                            4,
+                        );
+                    }
+                    self.invalidate();
+                }
+                None
+            }
             WM_SIZE => {
                 // Sizes here are physical pixels. `render()` derives the DIP
                 // size from the client rect + current scale; writing physical
@@ -2342,6 +2392,13 @@ impl AppState {
                 let delta = ((wparam.0 >> 16) & 0xFFFF) as i16 as i32;
                 let max = self.max_scroll();
                 self.scroll = (self.scroll - delta / 3).clamp(0, max);
+                // Cards are only given a logo when they come into view: the
+                // initial pass covers the first screen, scrolling pulls the
+                // next batch without ever firing 850 requests at once.
+                if self.last_icon_queue.elapsed() >= Duration::from_millis(400) {
+                    self.last_icon_queue = Instant::now();
+                    self.queue_icons();
+                }
                 self.invalidate();
                 Some(LRESULT(0))
             }
@@ -2633,6 +2690,22 @@ pub unsafe extern "system" fn wndproc(
     }
     let st = &mut *(ptr as *mut AppState);
     if msg == WM_DESTROY {
+        // Remember the window rectangle so the next launch reopens where the
+        // user left it, the way every other Windows app behaves.
+        let mut wp = WINDOWPLACEMENT {
+            length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        if GetWindowPlacement(hwnd, &mut wp).is_ok() {
+            let r = wp.rcNormalPosition;
+            crate::persist::save_window(crate::persist::WindowPlacement {
+                x: r.left,
+                y: r.top,
+                w: r.right - r.left,
+                h: r.bottom - r.top,
+                maximized: wp.showCmd as i32 == SW_SHOWMAXIMIZED.0,
+            });
+        }
         let _ = Box::from_raw(ptr as *mut AppState);
         let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         PostQuitMessage(0);

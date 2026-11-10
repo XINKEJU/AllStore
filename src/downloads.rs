@@ -682,6 +682,7 @@ impl AppState {
         }
         if restored > 0 {
             Self::net_log_restore(restored, resumed_bytes);
+            self.sync_taskbar();
         }
     }
 
@@ -715,6 +716,45 @@ impl AppState {
         ));
     }
 
+    /// Mirror the queue onto the taskbar button: green while anything is
+    /// transferring, amber when only paused jobs remain, hidden otherwise.
+    /// Mirrors Explorer's own copy-dialog behaviour.
+    pub(crate) fn sync_taskbar(&self) {
+        let Some(tb) = &self.taskbar else { return };
+        use windows::Win32::UI::Shell::{
+            TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL, TBPF_PAUSED,
+        };
+        let (mut done, mut total) = (0u64, 0u64);
+        let (mut active, mut paused) = (0usize, 0usize);
+        for t in &self.downloads {
+            match t.state {
+                DlState::Downloading | DlState::Queued => active += 1,
+                DlState::Paused => paused += 1,
+                _ => continue,
+            }
+            done += t.done;
+            total += t.total;
+        }
+        unsafe {
+            let hwnd = self.hwnd;
+            if active > 0 {
+                if total > 0 {
+                    let _ = tb.SetProgressState(hwnd, TBPF_NORMAL);
+                    let _ = tb.SetProgressValue(hwnd, done, total);
+                } else {
+                    let _ = tb.SetProgressState(hwnd, TBPF_INDETERMINATE);
+                }
+            } else if paused > 0 {
+                let _ = tb.SetProgressState(hwnd, TBPF_PAUSED);
+                if total > 0 {
+                    let _ = tb.SetProgressValue(hwnd, done, total);
+                }
+            } else {
+                let _ = tb.SetProgressState(hwnd, TBPF_NOPROGRESS);
+            }
+        }
+    }
+
     pub fn on_dl_progress(&mut self, id: u64, done: u64, total: u64, speed: f64, disk: f64) {
         let Some(t) = self.downloads.iter_mut().find(|t| t.id == id) else {
             return;
@@ -732,6 +772,7 @@ impl AppState {
         }
         t.speed = speed;
         t.disk_speed = disk;
+        self.sync_taskbar();
         self.invalidate();
     }
 
@@ -783,6 +824,7 @@ impl AppState {
                 let _ = std::fs::remove_file(updates_ui::part_path(&t.name, &t.url));
                 let short = path.rsplit(['\\', '/']).next().unwrap_or(&path);
                 self.status = format!("✓ {} 已下载到 Downloads（{}）", t.name, short);
+                crate::toast::download_done(&t.name, short);
             }
             Err(e) => {
                 // A pause pre-set this to Paused and flipped the cancel flag;
@@ -829,6 +871,7 @@ impl AppState {
         self.save_downloads();
         // A finished task frees its slot; give it to the next queued job.
         self.pump();
+        self.sync_taskbar();
         self.invalidate();
     }
 
@@ -854,6 +897,7 @@ impl AppState {
         }
         self.downloads.retain(|t| t.id != id);
         self.save_downloads();
+        self.sync_taskbar();
         self.invalidate();
     }
 

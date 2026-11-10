@@ -2,11 +2,23 @@
 
 <img src="assets/icon.png" width="96" alt="AllStore icon">
 
-> **AllStore**（原 MindosShop）—— 聚合联想、腾讯与 GitHub 三个来源的原生 Windows 软件商店，851 款应用，单文件 751 KB。
+> **AllStore**（原 MindosShop）—— 聚合联想、腾讯与 GitHub 三个来源的原生 Windows 软件商店，851 款应用，单文件 777 KB。
 
 一个纯净、轻量的原生 Windows 应用商店客户端。以联想应用商店、腾讯软件中心的公开内容接口与 GitHub Release 作为数据源（可再加自定义 JSON 源），但**不含**广告、运营位、捆绑推荐、热搜推广词与遥测上报。
 
-当前版本：**0.11.1**
+当前版本：**0.13.0**
+
+## Windows 原生细节（0.13.0）
+
+这一版把「像 Windows 应用」当成功能本身，而不是皮肤：
+
+- **任务栏进度**：`ITaskbarList3` 把下载队列镜像到任务栏按钮——下载中是绿色进度，只剩暂停任务时是黄色，队列清空后自动隐藏，和资源管理器的复制对话框一致
+- **完成通知**：下载结束通过 WinRT Toast 弹出「下载完成」，点击开始菜单快捷方式落的 `System.AppUserModel.ID` 让免打包应用也能正常投递；通知失败只写日志，绝不影响下载
+- **跟随系统深浅色**：收到 `WM_SETTINGCHANGE` 后重读 `AppsUseLightTheme`，立即换调色板并同步 DWM 标题栏颜色，不用重启
+- **记住窗口位置**：退出时保存窗口矩形（物理像素）到 `%LOCALAPPDATA%\AllStore\window.json`，下次在原位置、原大小打开；若那台显示器已拔掉，按当前显示器工作区收回来
+- **单实例**：再次双击 exe 不会出现第二个进程，而是唤起并前置已有窗口
+- **GitHub 图标**：改从 `avatars.githubusercontent.com` 直接取组织头像，绕开 `github.com/<owner>.png` 的 302 跳转（主站在部分网络下不可达时，跳转永远不返回）；图标落盘缓存，滚动到新卡片时继续按需加载
+- **图标缓存自愈**：失败不再写成永久的空标记文件，下一次启动自动重试；旧版本留下的空缓存会在读取时删除
 
 **启动不再白屏（0.11.1）**：目录首次拉取成功后写入 `%LOCALAPPDATA%\AllStore\catalog.json`（含分类导航，临时文件 + 改名防半截写入）。之后每次启动直接渲染缓存目录，状态栏显示「本地缓存（x 分钟前）· 正在后台刷新…」，后台拉到新目录后原位替换并更新缓存；刷新失败也不清屏，只提示「正在显示本地缓存目录」。
 
@@ -16,7 +28,7 @@
 
 | | 原版（剪枝后） | AllStore |
 |---|---|---|
-| 交付体积 | 234.9 MB | **751 KB（单 exe，静态 CRT）** |
+| 交付体积 | 234.9 MB | **777 KB（单 exe，静态 CRT）** |
 | 进程数 | 5 | **1** |
 | 窗口 | CEF 浏览器壳 | **真 HWND** |
 | 运行时 | CEF + 124 版 Chromium | **无（仅系统 DLL）** |
@@ -37,9 +49,9 @@
 
 | 产物 | 体积 | 说明 |
 |---|---|---|
-| `AllStore-0.11.0-x64.msi` | 1.07 MB | 用户级安装包，**不弹 UAC** |
-| `AllStore-0.11.0-windows-x64.zip` | 0.38 MB | 便携包：exe + LICENSE + 说明 |
-| `AllStore-0.11.0-windows-x64.exe` | 0.73 MB | 裸 exe，双击即用 |
+| `AllStore-0.13.0-x64.msi` | 1.08 MB | 用户级安装包，**不弹 UAC** |
+| `AllStore-0.13.0-windows-x64.zip` | 0.40 MB | 便携包：exe + LICENSE + 说明 |
+| `AllStore-0.13.0-windows-x64.exe` | 0.76 MB | 裸 exe，双击即用 |
 
 MSI 用 WiX v5 构建（`installer/allstore.wxs`，`tools/build_msi.ps1` 一条命令出全套）：
 
@@ -120,7 +132,7 @@ MSI 用 WiX v5 构建（`installer/allstore.wxs`，`tools/build_msi.ps1` 一条�
 - 卸载先弹**系统模态确认框**，确认后才交给厂商自带的卸载程序（`QuietUninstallString` 优先，其次 `UninstallString`）；本程序自身不删除任何文件、不提权
 - 「刷新列表」重新读注册表并同步更新徽标；进入页面时若距上次扫描超过 60 秒也会自动重扫
 
-验证：**72 个单元测试**（新增多源去重、自定义源解析、本地搜索、来源标签几何、软件库按钮几何、续传 `Content-Range` 解析、GitHub 选包规则与清单词表一致性）+ **8 个联网冒烟**；其中「预置残包 → 续传 → 与整包逐字节比对」是真实网络下的端到端用例。真实窗口截图核对：首页（4 个来源标签 / 851 款）、聊天社交分类（56 款 = 联想 36 + 腾讯 15 + GitHub 5）、下载管理（腾讯QQ 换源后 7.2 MB/s、Rufus 从 GitHub 完整下载）、我的软件（160 行、按钮不重叠）。
+验证：**78 个单元测试**（新增多源去重、自定义源解析、本地搜索、来源标签几何、软件库按钮几何、续传 `Content-Range` 解析、GitHub 选包规则与清单词表一致性）+ **8 个联网冒烟**；其中「预置残包 → 续传 → 与整包逐字节比对」是真实网络下的端到端用例。真实窗口截图核对：首页（4 个来源标签 / 851 款）、聊天社交分类（56 款 = 联想 36 + 腾讯 15 + GitHub 5）、下载管理（腾讯QQ 换源后 7.2 MB/s、Rufus 从 GitHub 完整下载）、我的软件（160 行、按钮不重叠）。
 
 **分类页也有腾讯源（0.9.2）**：0.9.1 只修好了「推荐」页，点进「聊天社交」这类分类时仍只剩联想——因为分类页是拿中文标签去请求联想接口的，腾讯的分类名与侧边栏不一致（`聊天` vs `聊天社交`、`影音` vs `视频软件`…），对不上自然筛不出来。
 
@@ -178,7 +190,7 @@ MSI 用 WiX v5 构建（`installer/allstore.wxs`，`tools/build_msi.ps1` 一条�
 | 排除 `portable` `-cli` `patch` 与 `1061to1064` 这类增量包 | 便携版/命令行版不是用户想要的那个安装程序 |
 | 优先 `x64` `amd64` `x86-64` + `setup` / `installer`，并与软件名契合 | 一行里有多个安装包时挑主力构建 |
 
-**卡片用字母色块而不是仓库头像**：`github.com/<owner>.png` 从这台机器要 20 秒才回，或者直接不回，而且 115 个慢请求会占满只有 6 个线程的图标池，把联想和腾讯的图标一起拖慢。不设 `logo`，走既有的首字母色块兜底，比一排加载不出来的灰框干净。
+**卡片用仓库头像，但直连头像 CDN**：`github.com/<owner>.png` 只是一次 302，跳到 `avatars.githubusercontent.com`；在 github.com 主站不可达或很慢的网络里，这个跳转根本回不来，卡片就全变成首字母色块。现在直接请求 `avatars.githubusercontent.com/<owner>?size=256`，并配合磁盘图标缓存——首次成功后永久命中，失败也不写死，下次启动会重试；仍取不到时才回落到首字母色块。
 
 **分类沿用侧边栏词表**，所以开源软件也会出现在分类页里，不是一个孤立的下拉列表：实测「聊天社交」= 联想 36 + 腾讯 15 + GitHub 5（Telegram Desktop、Mattermost、Rocket.Chat、Zulip、Element）。
 
@@ -341,7 +353,7 @@ MSI 用 WiX v5 构建（`installer/allstore.wxs`，`tools/build_msi.ps1` 一条�
 cargo build --release
 # 产物：target\release\allstore.exe（图标与版本信息由 build.rs 写入）
 
-cargo test                           # 72 个单元测试（布局几何、文本测量、搜索光标、速度采样、更新重扫描、多源聚合、GitHub 选包、解析回归）
+cargo test                           # 78 个单元测试（布局几何、文本测量、搜索光标、速度采样、更新重扫描、多源聚合、GitHub 选包、解析回归）
 cargo test -- --ignored --nocapture  # 8 个联网冒烟测试（302 / 真实下载 / 进度头 / 断点续传 / 腾讯源 / 多源合并 / 更新匹配）
 cargo clippy --all-targets           # 零警告
 cargo fmt --check
@@ -360,7 +372,7 @@ powershell -File tools\build_msi.ps1
 
 ## 安装
 
-**MSI（推荐）**：双击 `AllStore-0.11.0-x64.msi`，向导装完即可。用户级安装、不需要管理员权限，装到：
+**MSI（推荐）**：双击 `AllStore-0.13.0-x64.msi`，向导装完即可。用户级安装、不需要管理员权限，装到：
 
 ```
 %LOCALAPPDATA%\AllStore\allstore.exe
@@ -368,7 +380,7 @@ powershell -File tools\build_msi.ps1
 
 同时创建开始菜单与桌面快捷方式、「添加或删除程序」卸载项（带图标），升级时原地替换旧版本。`installer\PORTABLE.txt` 与 MSI 的许可页都写清了它只装 exe、不装服务、不设自启。
 
-**便携包**：解压 `AllStore-0.11.0-windows-x64.zip` 直接双击 `AllStore.exe`，不写任何注册表；也可以运行包里的 `install.ps1` 补一个开始菜单入口（脚本还会顺手清掉旧 MindosShop 的快捷方式与卸载项）。
+**便携包**：解压 `AllStore-0.13.0-windows-x64.zip` 直接双击 `AllStore.exe`，不写任何注册表；也可以运行包里的 `install.ps1` 补一个开始菜单入口（脚本还会顺手清掉旧 MindosShop 的快捷方式与卸载项）。
 
 程序不写注册表配置、不驻留服务、不设开机自启；状态只落在 `%LOCALAPPDATA%\AllStore\*.json`。exe 未做代码签名，首次运行若被 SmartScreen 拦截，点「更多信息 → 仍要运行」。
 

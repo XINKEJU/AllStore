@@ -747,13 +747,23 @@ fn github() -> Result<Vec<App>, String> {
         serde_json::from_str(GH_SEEDS).map_err(|e| format!("内置开源清单损坏：{}", e))?;
     let mut out = Vec::with_capacity(seeds.len());
     for s in seeds {
+        let owner = s.repo.split('/').next().unwrap_or("").to_string();
         out.push(App {
             id: format!("G{:016x}", hash(&s.repo)),
             name: s.name,
-            // No logo: GitHub's avatar CDN answers in 20 s or not at all from
-            // this network, and 115 stalled requests would clog the six-thread
-            // icon pool that every other source depends on. The card falls back
-            // to the designed initial tile instead.
+            // The organisation avatar is the closest thing GitHub has to a
+            // project logo. Ask the avatar CDN directly: `github.com/<owner>.png`
+            // is a 302 pointer to this same host, and on networks where the
+            // main github.com site is slow or blocked that redirect never
+            // resolves, which left every GitHub card on the letter tile.
+            logo: if owner.is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "https://avatars.githubusercontent.com/{}?size=256",
+                    owner
+                ))
+            },
             desc: Some(s.desc),
             category: Some(s.cat),
             dl_a: Some(format!("gh:{}", s.repo)),
@@ -1470,9 +1480,12 @@ mod tests {
         assert_eq!(row.download_url(), "gh:ip7z/7zip");
         assert!(row.is_lazy_link(), "解析型链接不该被 HEAD 探测");
         assert_eq!(row.origin(), GITHUB);
-        // Letters beat a stalled avatar CDN: 115 slow image requests would
-        // starve the icon pool every launch.
-        assert!(row.logo_url().is_none());
+        // The org avatar stands in for a project logo, fetched from the avatar
+        // CDN rather than through a github.com redirect.
+        assert_eq!(
+            row.logo_url(),
+            Some("https://avatars.githubusercontent.com/ip7z?size=256")
+        );
     }
 
     /// Release pages mix installers with signatures, deltas, ARM builds and

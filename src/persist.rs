@@ -98,6 +98,42 @@ pub fn load() -> Vec<TaskSnapshot> {
         .unwrap_or_default()
 }
 
+/// Last window rectangle, in physical pixels.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct WindowPlacement {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    #[serde(default)]
+    pub maximized: bool,
+}
+
+fn window_path() -> Option<PathBuf> {
+    let base = std::env::var("LOCALAPPDATA").ok()?;
+    Some(PathBuf::from(base).join("AllStore").join("window.json"))
+}
+
+pub fn load_window() -> Option<WindowPlacement> {
+    let p = window_path()?;
+    let s = std::fs::read_to_string(p).ok()?;
+    let w: WindowPlacement = serde_json::from_str(&s).ok()?;
+    (w.w > 0 && w.h > 0).then_some(w)
+}
+
+pub fn save_window(w: WindowPlacement) {
+    let Some(p) = window_path() else { return };
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(s) = serde_json::to_string(&w) {
+        let tmp = p.with_extension("json.tmp");
+        if std::fs::write(&tmp, s).is_ok() {
+            let _ = std::fs::rename(&tmp, &p);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

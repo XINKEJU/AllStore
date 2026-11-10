@@ -1,6 +1,6 @@
 [package]
 name = "allstore"
-version = "0.11.1"
+version = "0.13.0"
 edition = "2024"
 description = "AllStore — a pure, lightweight native Windows app store client"
 license = "MIT"
@@ -33,6 +33,8 @@ windows = { version = "0.62.2", features = [
     "Win32_System_SystemInformation",
     "Win32_Storage_FileSystem",
     "Win32_UI_Shell",
+    "UI_Notifications",
+    "Data_Xml_Dom",
 ] }
 windows-numerics = "0.3.1"
 

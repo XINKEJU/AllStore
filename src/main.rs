@@ -7,12 +7,14 @@ mod app;
 mod catcache;
 mod downloads;
 mod gfx;
+mod iconcache;
 mod installed;
 mod library;
 mod model;
 mod net;
 mod persist;
 mod source;
+mod toast;
 mod update;
 mod updates_ui;
 
@@ -24,6 +26,7 @@ use windows::Win32::Graphics::Gdi::UpdateWindow;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::*;
 use windows::Win32::UI::HiDpi::*;
+use windows::Win32::UI::Shell::ExtractIconExW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -41,6 +44,37 @@ fn fatal(text: &str) {
             MB_ICONERROR | MB_OK,
         );
     }
+}
+
+/// Keep a restored window rectangle on a monitor that still exists: the last
+/// session may have been on an external display that is now unplugged.
+fn clamp_placement(p: persist::WindowPlacement) -> (i32, i32, i32, i32) {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect,
+    };
+    unsafe {
+        let r = RECT {
+            left: p.x,
+            top: p.y,
+            right: p.x + p.w,
+            bottom: p.y + p.h,
+        };
+        let mon = MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(mon, &mut mi).as_bool() {
+            let wa = mi.rcWork;
+            let w = p.w.min(wa.right - wa.left).max(640);
+            let h = p.h.min(wa.bottom - wa.top).max(480);
+            let x = p.x.clamp(wa.left, (wa.right - w).max(wa.left));
+            let y = p.y.clamp(wa.top, (wa.bottom - h).max(wa.top));
+            return (x, y, w, h);
+        }
+    }
+    (p.x, p.y, p.w, p.h)
 }
 
 /// One-time data migration from the pre-rename layout (`MindosShop`) to the
@@ -89,7 +123,41 @@ fn main() {
         let hmod = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
         let instance = HINSTANCE(hmod.0);
         let class_name = w!("AllStoreWindow");
+
+        // One store at a time: a second launch raises the running window
+        // instead of stacking another instance on the taskbar.
+        if let Ok(existing) = FindWindowW(class_name, PCWSTR::null())
+            && !existing.is_invalid()
+        {
+            let _ = ShowWindow(existing, SW_RESTORE);
+            let _ = SetForegroundWindow(existing);
+            return;
+        }
+
+        toast::init();
+
+        // Reopen where the user left the window, unless that monitor is gone.
+        let placement = persist::load_window();
+        let (win_x, win_y, win_w, win_h) = placement
+            .map(clamp_placement)
+            .unwrap_or((120, 90, 1100, 720));
+
         let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
+
+        // Title-bar / Alt-Tab icons come from the icon embedded in this exe
+        // by build.rs, so the window chrome matches the taskbar button.
+        let mut exe_path = [0u16; 260];
+        let mut big = HICON::default();
+        let mut small = HICON::default();
+        if GetModuleFileNameW(None, &mut exe_path) > 0 {
+            ExtractIconExW(
+                PCWSTR::from_raw(exe_path.as_ptr()),
+                0,
+                Some(&mut big),
+                Some(&mut small),
+                1,
+            );
+        }
 
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -97,6 +165,8 @@ fn main() {
             lpfnWndProc: Some(app::wndproc),
             hInstance: instance,
             hCursor: cursor,
+            hIcon: big,
+            hIconSm: small,
             lpszClassName: class_name,
             ..Default::default()
         };
@@ -110,10 +180,10 @@ fn main() {
             class_name,
             w!("AllStore"),
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-            120,
-            90,
-            1100,
-            720,
+            win_x,
+            win_y,
+            win_w,
+            win_h,
             None,
             None,
             Some(instance),
@@ -157,7 +227,14 @@ fn main() {
         let state = Box::new(app::AppState::new(hwnd, graphics, cw, ch));
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
 
-        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = ShowWindow(
+            hwnd,
+            if placement.is_some_and(|p| p.maximized) {
+                SW_MAXIMIZE
+            } else {
+                SW_SHOW
+            },
+        );
         let _ = UpdateWindow(hwnd);
         // 500 ms clock: caret blink + transfer-speed sampling for the graph.
         SetTimer(Some(hwnd), app::TIMER_ID, 500, None);

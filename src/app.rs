@@ -21,7 +21,7 @@ use windows::core::GUID;
 
 use crate::catcache;
 use crate::downloads::{self, DlState, DlTask};
-use crate::gfx::{self, Gfx, Palette};
+use crate::gfx::{self, Color, Gfx, Palette};
 use crate::iconcache;
 use crate::installed::{InstalledApp, Inventory};
 use crate::library;
@@ -49,6 +49,44 @@ pub const WM_APP_INSTALL_DONE: u32 = 0x8000 + 13;
 pub const WM_APP_SELFUPDATE: u32 = 0x8000 + 14;
 /// Single 500 ms clock for caret blink and speed-graph sampling.
 pub const TIMER_ID: usize = 1;
+/// 60 Hz clock that only exists while an easing transition is still running.
+pub const TIMER_ANIM: usize = 2;
+
+/// A single eased scalar. Values chase their target exponentially, which is
+/// what makes hover, the navigation pill and the page slide feel continuous
+/// instead of snapping between states.
+#[derive(Clone, Copy)]
+pub struct Motion {
+    pub value: f32,
+    pub target: f32,
+}
+
+impl Motion {
+    fn new(v: f32) -> Self {
+        Self {
+            value: v,
+            target: v,
+        }
+    }
+    fn set(&mut self, target: f32) {
+        self.target = target;
+    }
+    fn snap(&mut self, v: f32) {
+        self.value = v;
+        self.target = v;
+    }
+    /// Advance one frame. Returns true while more frames are needed.
+    fn step(&mut self, dt: f32) -> bool {
+        let d = self.target - self.value;
+        if d.abs() < 0.001 {
+            self.value = self.target;
+            return false;
+        }
+        // ~14/s damping: 95% of the distance in ~215 ms at 60 fps.
+        self.value += d * (dt * 14.0).min(1.0);
+        true
+    }
+}
 
 /// Set once the cached catalog is on screen. `start_load` reads it to word
 /// its progress line ("后台刷新" instead of "正在聚合"), which is the truth
@@ -256,6 +294,18 @@ pub struct AppState {
     pub scroll: i32,
     /// (hit kind, index) of the control under the pointer.
     pub hover: Option<(u8, usize)>,
+    /// Opacity of that hover tint, eased toward 1 while the pointer stays.
+    pub hover_anim: Motion,
+    /// Y of the sliding sidebar selection pill.
+    pub nav_pill: Motion,
+    /// 1 = a nav row is selected, 0 = a utility page owns the content pane.
+    pub nav_pill_vis: Motion,
+    /// Page transition progress (0 = entering, 1 = settled).
+    pub page_anim: Motion,
+    /// Mode seen on the previous frame, used to trigger the page transition.
+    last_mode: Mode,
+    last_tick: Instant,
+    anim_running: bool,
     pub status: String,
     pub loading: bool,
     pub updates: Vec<UpdateItem>,
@@ -334,7 +384,21 @@ pub(crate) fn draw_button(
     } else {
         (p.card, p.text)
     };
-    g.round(r, 8.0, bg);
+    if primary && !disabled {
+        // A slight vertical lightening reads as a real button instead of a
+        // flat accent rectangle; hover lifts the top stop a little more.
+        let lift = if hovered { 0.16 } else { 0.08 };
+        g.vgradient(
+            r,
+            8.0,
+            p.accent.mix(Color(1.0, 1.0, 1.0, 1.0), lift),
+            p.accent,
+        );
+    } else if hovered && !disabled {
+        g.round(r, 8.0, p.card.mix(p.accent_soft, 0.55));
+    } else {
+        g.round(r, 8.0, bg);
+    }
     if !primary && !disabled {
         g.outline(r, p.border, 1.0);
     }
@@ -399,6 +463,13 @@ impl AppState {
             detail_extra: None,
             scroll: 0,
             hover: None,
+            hover_anim: Motion::new(0.0),
+            nav_pill: Motion::new(0.0),
+            nav_pill_vis: Motion::new(1.0),
+            page_anim: Motion::new(1.0),
+            last_mode: Mode::Browse,
+            last_tick: Instant::now(),
+            anim_running: false,
             status: "正在连接应用目录…".into(),
             loading: true,
             updates: cache.items.clone(),
@@ -435,6 +506,9 @@ impl AppState {
         };
         downloads::set_max_concurrent(state.settings.concurrency());
         state.apply_theme();
+        // Place the selection pill before the first paint; it only slides on
+        // later selections (starting at 0 would make it fly in on launch).
+        state.nav_pill = Motion::new(state.nav_y(state.active_nav));
         // One small API call at launch; failures stay silent in the status line
         // of the "关于" card and never block the window from opening.
         state.check_self_update();
@@ -847,6 +921,7 @@ impl AppState {
             ),
         };
         self.queue_icons();
+        self.bump_page();
         self.invalidate();
     }
 
@@ -875,6 +950,7 @@ impl AppState {
             None => format!("显示全部软件源  ·  {} 款应用", self.apps.len()),
         };
         self.queue_icons();
+        self.bump_page();
         self.invalidate();
     }
 
@@ -888,6 +964,55 @@ impl AppState {
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
         }
+    }
+
+    // --- animation plumbing ------------------------------------------------
+
+    /// Start the 60 Hz clock. Idempotent, so any state change can ask for it.
+    fn start_anim(&mut self) {
+        self.last_tick = Instant::now();
+        if !self.anim_running {
+            self.anim_running = true;
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_ANIM, 16, None);
+            }
+        }
+    }
+
+    fn stop_anim(&mut self) {
+        if self.anim_running {
+            self.anim_running = false;
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_ANIM);
+            }
+        }
+    }
+
+    /// How strongly the given control is hovered right now (0..1).
+    pub(crate) fn hover_amt(&self, hit: u8, idx: usize) -> f32 {
+        if self.hover == Some((hit, idx)) {
+            self.hover_anim.value
+        } else {
+            0.0
+        }
+    }
+
+    /// Sidebar rows are only highlighted while a catalog page is open.
+    fn pill_visible(&self) -> bool {
+        !matches!(self.mode, Mode::Updates | Mode::Downloads | Mode::Settings)
+    }
+
+    /// Play the content slide and make sure the clock is running.
+    fn bump_page(&mut self) {
+        self.page_anim.snap(0.0);
+        self.page_anim.set(1.0);
+        self.start_anim();
+    }
+
+    /// Retarget the selection pill; called whenever the active row changes.
+    fn move_pill(&mut self) {
+        self.nav_pill.set(self.nav_y(self.active_nav));
+        self.start_anim();
     }
 
     fn load_nav(&mut self, classes: &[ClassGroup]) {
@@ -928,6 +1053,7 @@ impl AppState {
         self.active_nav = previous
             .and_then(|(kind, id)| self.nav.iter().position(|n| n.kind == kind && n.id == id))
             .unwrap_or(0);
+        self.nav_pill.snap(self.nav_y(self.active_nav));
     }
 
     fn next_epoch(&mut self) -> u64 {
@@ -966,6 +1092,7 @@ impl AppState {
         }
         let item = self.nav[idx].clone();
         self.active_nav = idx;
+        self.move_pill();
         self.focus_search = false;
         self.mode = Mode::Browse;
         self.scroll = 0;
@@ -1021,6 +1148,7 @@ impl AppState {
         self.focus_search = false;
         self.mode = Mode::Updates;
         self.scroll = 0;
+        self.bump_page();
         self.show_updates();
     }
 
@@ -1028,6 +1156,7 @@ impl AppState {
         self.focus_search = false;
         self.mode = Mode::Downloads;
         self.scroll = 0;
+        self.bump_page();
         self.status = format!(
             "下载管理  ·  {} 个任务  ·  {} 个进行中",
             self.downloads.len(),
@@ -1041,6 +1170,7 @@ impl AppState {
         self.mode = Mode::Settings;
         self.scroll = 0;
         self.field = None;
+        self.bump_page();
         self.status = "设置  ·  修改立即保存到本机".into();
         self.invalidate();
     }
@@ -1509,6 +1639,12 @@ impl AppState {
         let w = self.width as f32;
         let h = self.height as f32;
         let p = self.gfx.pal;
+        // Any page change that bypassed the explicit helpers still gets the
+        // transition, so the animation can never be "forgotten" by one path.
+        if self.mode != self.last_mode {
+            self.last_mode = self.mode;
+            self.bump_page();
+        }
         self.gfx.begin();
 
         // Content background first; the header and nav paint over it.
@@ -1520,6 +1656,12 @@ impl AppState {
         // Everything below is clipped to the content pane, so scrolling text
         // cannot cover the header, navigation or status bar.
         self.gfx.push_clip(gfx::rect(NAV_W, TOP_H, w, h - STATUS_H));
+        // Enter animations slide the new page up a few DIPs. The transform is
+        // applied inside the clip so the header and status bar never move.
+        let slide = (1.0 - self.page_anim.value) * 10.0;
+        if slide > 0.2 {
+            self.gfx.translate(0.0, slide);
+        }
         match self.mode {
             Mode::Detail => self.render_detail(w, h),
             Mode::Updates => self.render_updates(w, h),
@@ -1528,12 +1670,21 @@ impl AppState {
             Mode::Settings => self.render_settings(w, h),
             Mode::Browse => self.render_browse(w, h),
         }
+        let sliding = slide > 0.2;
+        if sliding {
+            self.gfx.reset_transform();
+        }
         self.draw_scrollbar(w, h);
         self.gfx.pop_clip();
 
         // Status bar: message on the left, live download progress in the
         // middle and a permanent shortcut into the download centre.
-        self.gfx.fill(gfx::rect(0.0, h - STATUS_H, w, h), p.status);
+        self.gfx.vgradient(
+            gfx::rect(0.0, h - STATUS_H, w, h),
+            0.0,
+            p.status.mix(p.panel, 0.45),
+            p.status,
+        );
         self.gfx.fill(
             gfx::rect(0.0, h - STATUS_H, w, h - STATUS_H + 1.0),
             p.border,
@@ -1573,12 +1724,26 @@ impl AppState {
 
     fn render_header(&mut self, w: f32) {
         let p = self.gfx.pal;
-        self.gfx.fill(gfx::rect(0.0, 0.0, w, TOP_H), p.panel);
+        // A very faint vertical tint plus a hairline: enough depth that the
+        // header separates from the content without becoming a heavy toolbar.
+        self.gfx.vgradient(
+            gfx::rect(0.0, 0.0, w, TOP_H),
+            0.0,
+            p.panel.mix(Color(1.0, 1.0, 1.0, 1.0), 0.05),
+            p.panel.mix(p.bg, 0.45),
+        );
         self.gfx
             .fill(gfx::rect(0.0, TOP_H - 1.0, w, TOP_H), p.border);
 
         let logo = gfx::rect(20.0, 18.0, 56.0, 54.0);
-        self.gfx.round(logo, 10.0, p.accent);
+        self.gfx
+            .shadow(logo, 12.0, if self.gfx.is_dark() { 0.35 } else { 0.14 });
+        self.gfx.vgradient(
+            logo,
+            12.0,
+            p.accent.mix(Color(1.0, 1.0, 1.0, 1.0), 0.18),
+            p.accent.mix(Color(0.0, 0.0, 0.0, 1.0), 0.14),
+        );
         self.gfx.center_text("A", logo, 18, true, p.on_accent);
         self.gfx.text(
             "AllStore",
@@ -1667,10 +1832,11 @@ impl AppState {
             ),
         ];
         for (r, glyph, count, hit, active) in icons {
+            let amt = self.hover_amt(hit, 0);
             if active {
                 self.gfx.round(r, 20.0, p.accent_soft);
-            } else if self.hover == Some((hit, 0)) {
-                self.gfx.round(r, 20.0, p.hover);
+            } else if amt > 0.01 {
+                self.gfx.round(r, 20.0, p.hover.with_alpha(amt));
             }
             self.gfx
                 .icon(glyph, r, 17, if active { p.accent } else { p.text });
@@ -1690,8 +1856,12 @@ impl AppState {
 
     fn render_nav(&mut self, h: f32) {
         let p = self.gfx.pal;
-        self.gfx
-            .fill(gfx::rect(0.0, TOP_H, NAV_W, h - STATUS_H), p.panel);
+        self.gfx.vgradient(
+            gfx::rect(0.0, TOP_H, NAV_W, h - STATUS_H),
+            0.0,
+            p.panel,
+            p.panel.mix(p.bg, 0.55),
+        );
         self.gfx
             .fill(gfx::rect(NAV_W - 1.0, TOP_H, NAV_W, h - STATUS_H), p.border);
         let rects: Vec<D2D_RECT_F> = (0..self.nav.len()).map(|i| self.nav_rect(i)).collect();
@@ -1703,6 +1873,20 @@ impl AppState {
         // Reserve the footer band: without this the last category row was
         // drawn straight through the version label on short windows.
         let footer_top = h - STATUS_H - 40.0;
+        // The selection pill is one object that slides between rows instead of
+        // a background that teleports — the single most noticeable motion cue
+        // in a sidebar, and it fades out when a utility page takes over.
+        let vis = self.nav_pill_vis.value.clamp(0.0, 1.0);
+        if vis > 0.01 && !utility {
+            let py = self.nav_pill.value;
+            let pill = gfx::rect(12.0, py, NAV_W - 12.0, py + 34.0);
+            self.gfx.round(pill, 9.0, p.accent_soft.with_alpha(vis));
+            self.gfx.round(
+                gfx::rect(12.0, py + 8.0, 15.0, py + 26.0),
+                1.5,
+                p.accent.with_alpha(vis),
+            );
+        }
         let mut prev_group = u8::MAX;
         for i in 0..self.nav.len() {
             let r = rects[i];
@@ -1720,25 +1904,17 @@ impl AppState {
                 );
             }
             let active = i == self.active_nav && !utility;
-            let hovered = self.hover == Some((HIT_NAV, i));
-            if active {
-                self.gfx.round(r, 8.0, p.accent_soft);
-            } else if hovered {
-                self.gfx.round(r, 8.0, p.hover);
+            let amt = self.hover_amt(HIT_NAV, i);
+            if !active && amt > 0.01 {
+                self.gfx.round(r, 9.0, p.hover.with_alpha(amt));
             }
-            if active {
-                self.gfx.round(
-                    gfx::rect(12.0, r.top + 8.0, 15.0, r.bottom - 8.0),
-                    1.5,
-                    p.accent,
-                );
-            }
+            let hot = active && vis > 0.5;
             self.gfx.text(
                 &labels[i],
                 gfx::rect(26.0, r.top, r.right - 12.0, r.bottom),
                 13,
-                active,
-                if active { p.accent } else { p.text },
+                hot,
+                if hot { p.accent } else { p.text },
             );
         }
         self.gfx.fill(
@@ -1750,8 +1926,9 @@ impl AppState {
         let gear = Self::gear_rect(h);
         if self.mode == Mode::Settings {
             self.gfx.round(gear, 8.0, p.accent_soft);
-        } else if self.hover == Some((HIT_SET_GEAR, 0)) {
-            self.gfx.round(gear, 8.0, p.hover);
+        } else if self.hover_amt(HIT_SET_GEAR, 0) > 0.01 {
+            let amt = self.hover_amt(HIT_SET_GEAR, 0);
+            self.gfx.round(gear, 8.0, p.hover.with_alpha(amt));
         }
         self.gfx.icon(
             '\u{E713}',
@@ -1785,8 +1962,37 @@ impl AppState {
         // the download centre so progress is never more than one click away.
         let hero = gfx::rect(NAV_W + PAD, TOP_H + 14.0, w - PAD, TOP_H + 14.0 + HERO_H);
         if hero.right > hero.left + 200.0 {
-            self.gfx.round(hero, 16.0, p.accent_soft);
-            self.gfx.outline(hero, p.border, 0.8);
+            let dark = self.gfx.is_dark();
+            self.gfx.shadow(hero, 16.0, if dark { 0.30 } else { 0.09 });
+            self.gfx.vgradient(
+                hero,
+                16.0,
+                p.accent_soft.mix(p.accent, 0.18),
+                p.accent_soft.mix(p.card, 0.20),
+            );
+            self.gfx.outline(hero, p.accent.with_alpha(0.20), 1.0);
+            // Decorative depth rings, kept inside the card so nothing leaks
+            // over the rounded corners.
+            self.gfx.round(
+                gfx::rect(
+                    hero.right - 96.0,
+                    hero.top + 2.0,
+                    hero.right - 12.0,
+                    hero.top + 86.0,
+                ),
+                42.0,
+                p.accent.with_alpha(0.055),
+            );
+            self.gfx.round(
+                gfx::rect(
+                    hero.right - 52.0,
+                    hero.top + 46.0,
+                    hero.right - 12.0,
+                    hero.top + 86.0,
+                ),
+                20.0,
+                p.accent.with_alpha(0.07),
+            );
             // Three non-overlapping columns: title/subtitle | stats | action.
             let btn = Self::hero_dl_rect(w);
             let stat_right = btn.left - 20.0;
@@ -1809,17 +2015,21 @@ impl AppState {
             // catalog comes from and double as a one-click filter.
             let chips = self.source_chip_rects(w);
             let filter = self.source_filter.clone();
-            let hover = self.hover;
             for (i, (r, src)) in chips.iter().enumerate() {
                 let active = *src == filter;
                 let label = chip_label(&self.sources, &self.source_counts, i);
-                self.gfx
-                    .round(*r, 9.0, if active { p.accent } else { p.bg });
-                if !active {
-                    self.gfx.outline(*r, p.border, 0.8);
-                }
-                if hover == Some((HIT_SOURCE, i)) {
-                    self.gfx.outline(*r, p.accent, 1.4);
+                let amt = self.hover_amt(HIT_SOURCE, i);
+                if active {
+                    self.gfx.vgradient(
+                        *r,
+                        9.0,
+                        p.accent.mix(Color(1.0, 1.0, 1.0, 1.0), 0.12),
+                        p.accent,
+                    );
+                } else {
+                    self.gfx.round(*r, 9.0, p.card.mix(p.bg, amt * 0.5));
+                    self.gfx
+                        .outline(*r, p.border.mix(p.accent, amt), 0.8 + amt * 0.6);
                 }
                 self.gfx.center_text(
                     &label,
@@ -1888,23 +2098,35 @@ impl AppState {
             let Some(card) = self.card_rect(i) else {
                 continue;
             };
-            let hovered = self.hover == Some((HIT_CARD, i)) || self.hover == Some((HIT_INSTALL, i));
-            let (x0, y0, x1, y1) = card;
-            self.gfx.round(
-                gfx::rect(x0, y0, x1, y1),
-                14.0,
-                if hovered { p.hover } else { p.card },
+            // Hovering the card or its action both lift the whole tile: motion
+            // plus a stronger shadow, the way every current Windows store does.
+            let hov = self
+                .hover_amt(HIT_CARD, i)
+                .max(self.hover_amt(HIT_INSTALL, i));
+            let lift = 3.0 * hov;
+            let (x0, y0, x1, y1) = (card.0, card.1 - lift, card.2, card.3 - lift);
+            let card = (x0, y0, x1, y1);
+            let r = gfx::rect(x0, y0, x1, y1);
+            let dark = self.gfx.is_dark();
+            self.gfx
+                .shadow(r, 16.0, (if dark { 0.30 } else { 0.10 }) + 0.14 * hov);
+            self.gfx.vgradient(
+                r,
+                16.0,
+                p.card.mix(p.accent_soft, 0.55 * hov),
+                p.card.mix(p.bg, 0.24).mix(p.accent_soft, 0.40 * hov),
             );
-            self.gfx.outline(
-                gfx::rect(x0, y0, x1, y1),
-                if hovered { p.accent } else { p.border },
-                if hovered { 1.4 } else { 0.9 },
-            );
+            self.gfx.outline(r, p.border.mix(p.accent, hov), 0.9 + hov);
 
             let icon = gfx::rect(x0 + 16.0, y0 + 16.0, x0 + 80.0, y0 + 80.0);
             let key = a.logo_url().unwrap_or("");
             if !self.gfx.bitmap(key, icon) {
-                self.gfx.round(icon, 14.0, p.accent_soft);
+                self.gfx.vgradient(
+                    icon,
+                    14.0,
+                    p.accent_soft.mix(Color(1.0, 1.0, 1.0, 1.0), 0.10),
+                    p.accent_soft,
+                );
                 let ch: String = a.name.chars().take(1).collect();
                 self.gfx.center_text(&ch, icon, 24, true, p.accent);
             }
@@ -2097,8 +2319,15 @@ impl AppState {
 
         // Hero card: big icon, identity, metadata and one prominent action.
         let hero = gfx::rect(NAV_W + PAD, DETAIL_HERO_TOP, w - PAD, DETAIL_HERO_BOTTOM);
-        self.gfx.round(hero, 18.0, p.accent_soft);
-        self.gfx.outline(hero, p.border, 0.8);
+        self.gfx
+            .shadow(hero, 18.0, if self.gfx.is_dark() { 0.30 } else { 0.09 });
+        self.gfx.vgradient(
+            hero,
+            18.0,
+            p.accent_soft.mix(p.accent, 0.16),
+            p.accent_soft.mix(p.card, 0.20),
+        );
+        self.gfx.outline(hero, p.accent.with_alpha(0.18), 1.0);
         draw_button(
             &mut self.gfx,
             p,
@@ -2117,7 +2346,12 @@ impl AppState {
         );
         let key = a.logo_url().unwrap_or("");
         if !self.gfx.bitmap(key, icon) {
-            self.gfx.round(icon, 20.0, p.accent_soft);
+            self.gfx.vgradient(
+                icon,
+                20.0,
+                p.accent_soft.mix(Color(1.0, 1.0, 1.0, 1.0), 0.12),
+                p.accent_soft,
+            );
             let ch: String = a.name.chars().take(1).collect();
             self.gfx.center_text(&ch, icon, 44, true, p.accent);
         }
@@ -2552,6 +2786,22 @@ impl AppState {
                 }
             }
             WM_TIMER => {
+                if wparam.0 == TIMER_ANIM {
+                    let dt = self.last_tick.elapsed().as_secs_f32().clamp(0.001, 0.05);
+                    self.last_tick = Instant::now();
+                    let mut live = self.hover_anim.step(dt);
+                    self.nav_pill.set(self.nav_y(self.active_nav));
+                    live |= self.nav_pill.step(dt);
+                    self.nav_pill_vis
+                        .set(if self.pill_visible() { 1.0 } else { 0.0 });
+                    live |= self.nav_pill_vis.step(dt);
+                    live |= self.page_anim.step(dt);
+                    if !live {
+                        self.stop_anim();
+                    }
+                    self.invalidate();
+                    return Some(LRESULT(0));
+                }
                 if wparam.0 != TIMER_ID {
                     return None;
                 }
@@ -2655,6 +2905,14 @@ impl AppState {
                 let hover = self.hit_test(x, y);
                 if hover != self.hover {
                     self.hover = hover;
+                    // A newly hovered control fades its tint in from zero; the
+                    // previous one disappears instantly, which reads as the
+                    // highlight moving with the pointer.
+                    self.hover_anim.snap(0.0);
+                    if hover.is_some() {
+                        self.hover_anim.set(1.0);
+                    }
+                    self.start_anim();
                     self.invalidate();
                 }
                 Some(LRESULT(0))

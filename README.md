@@ -2,11 +2,22 @@
 
 <img src="assets/icon.png" width="96" alt="AllStore icon">
 
-> **AllStore**（原 MindosShop）—— 聚合联想、腾讯与 GitHub 三个来源的原生 Windows 软件商店，851 款应用，单文件 818 KB。
+> **AllStore**（原 MindosShop）—— 聚合联想、腾讯与 GitHub 三个来源的原生 Windows 软件商店，851 款应用，单文件 828 KB。
 
 一个纯净、轻量的原生 Windows 应用商店客户端。以联想应用商店、腾讯软件中心的公开内容接口与 GitHub Release 作为数据源（可再加自定义 JSON 源），但**不含**广告、运营位、捆绑推荐、热搜推广词与遥测上报。
 
-当前版本：**0.14.1**
+当前版本：**0.14.2**
+
+## 界面与动效升级（0.14.2）
+
+这一版把界面从「静态排列」升级成有层次、有反馈的界面，仍然只用系统组件：
+
+- **动效基础**：渲染层新增线性渐变、软阴影与位移三组原语，全部由 Direct2D 直接绘制，不引入图片、动画库或第三方 UI 框架
+- **悬停反馈**：卡片、导航、标题栏图标、来源标签在指针进入时淡入高亮（约 200 ms 指数缓动）；卡片整体上浮 3 px、阴影加深并出现蓝色描边
+- **页面转场**：切换首页 / 详情 / 下载 / 更新 / 我的软件 / 设置时，内容区上滑 10 px 入场，顶栏、侧边栏与状态栏保持稳定
+- **侧边栏选中指示**：由一个可滑动的胶囊块代替逐行跳变的高亮，切换分类时平滑移动；进入工具页时淡出
+- **视觉层次**：标题栏、侧边栏、状态栏改为纵向渐变加细分割线；首页与详情 Hero、主按钮使用渐变和投影；卡片、下载图表卡、空态卡与设置卡片统一加柔和阴影
+- **按需刷新**：新增 16 ms 动画定时器，只在过渡进行时启动，结束后自动关闭，空闲时不占 CPU
 
 ## 界面整理（0.14.1）
 
@@ -47,7 +58,7 @@
 
 | | 原版（剪枝后） | AllStore |
 |---|---|---|
-| 交付体积 | 234.9 MB | **818 KB（单 exe，静态 CRT）** |
+| 交付体积 | 234.9 MB | **828 KB（单 exe，静态 CRT）** |
 | 进程数 | 5 | **1** |
 | 窗口 | CEF 浏览器壳 | **真 HWND** |
 | 运行时 | CEF + 124 版 Chromium | **无（仅系统 DLL）** |
@@ -68,9 +79,9 @@
 
 | 产物 | 体积 | 说明 |
 |---|---|---|
-| `AllStore-0.14.1-x64.msi` | 1.10 MB | 用户级安装包，**不弹 UAC** |
-| `AllStore-0.14.1-windows-x64.zip` | 0.42 MB | 便携包：exe + LICENSE + 说明 |
-| `AllStore-0.14.1-windows-x64.exe` | 0.80 MB | 裸 exe，双击即用 |
+| `AllStore-0.14.2-x64.msi` | 1.10 MB | 用户级安装包，**不弹 UAC** |
+| `AllStore-0.14.2-windows-x64.zip` | 0.42 MB | 便携包：exe + LICENSE + 说明 |
+| `AllStore-0.14.2-windows-x64.exe` | 0.81 MB | 裸 exe，双击即用 |
 
 MSI 用 WiX v5 构建（`installer/allstore.wxs`，`tools/build_msi.ps1` 一条命令出全套）：
 
@@ -394,7 +405,7 @@ powershell -File tools\build_msi.ps1
 
 ## 安装
 
-**MSI（推荐）**：双击 `AllStore-0.14.1-x64.msi`，向导装完即可。用户级安装、不需要管理员权限，装到：
+**MSI（推荐）**：双击 `AllStore-0.14.2-x64.msi`，向导装完即可。用户级安装、不需要管理员权限，装到：
 
 ```
 %LOCALAPPDATA%\AllStore\allstore.exe
@@ -402,7 +413,7 @@ powershell -File tools\build_msi.ps1
 
 同时创建开始菜单与桌面快捷方式、「添加或删除程序」卸载项（带图标），升级时原地替换旧版本。`installer\PORTABLE.txt` 与 MSI 的许可页都写清了它只装 exe、不装服务、不设自启。
 
-**便携包**：解压 `AllStore-0.14.1-windows-x64.zip` 直接双击 `AllStore.exe`，不写任何注册表；也可以运行包里的 `install.ps1` 补一个开始菜单入口（脚本还会顺手清掉旧 MindosShop 的快捷方式与卸载项）。
+**便携包**：解压 `AllStore-0.14.2-windows-x64.zip` 直接双击 `AllStore.exe`，不写任何注册表；也可以运行包里的 `install.ps1` 补一个开始菜单入口（脚本还会顺手清掉旧 MindosShop 的快捷方式与卸载项）。
 
 程序不写注册表配置、不驻留服务、不设开机自启；状态只落在 `%LOCALAPPDATA%\AllStore\*.json`。exe 未做代码签名，首次运行若被 SmartScreen 拦截，点「更多信息 → 仍要运行」。
 

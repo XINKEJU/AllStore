@@ -1,5 +1,6 @@
 //! Direct2D / DirectWrite / WIC rendering layer. Everything is drawn with
 //! system components: no browser, no skia, no bundled fonts or TLS stack.
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 
@@ -12,7 +13,7 @@ use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::core::{Interface, w};
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 #[derive(Clone, Copy)]
 pub struct Color(pub f32, pub f32, pub f32, pub f32);
@@ -31,6 +32,20 @@ impl Color {
             ^ self.1.to_bits().rotate_left(8)
             ^ self.2.to_bits().rotate_left(16)
             ^ self.3.to_bits().rotate_left(24)
+    }
+    /// Same hue, different opacity. Used for hover tints and soft shadows.
+    pub fn with_alpha(self, a: f32) -> Self {
+        Color(self.0, self.1, self.2, a.clamp(0.0, 1.0))
+    }
+    /// Linear blend toward `other`; `t = 0` keeps `self`, `t = 1` gives `other`.
+    pub fn mix(self, other: Color, t: f32) -> Self {
+        let t = t.clamp(0.0, 1.0);
+        Color(
+            self.0 + (other.0 - self.0) * t,
+            self.1 + (other.1 - self.1) * t,
+            self.2 + (other.2 - self.2) * t,
+            self.3 + (other.3 - self.3) * t,
+        )
     }
 }
 
@@ -201,6 +216,10 @@ pub struct Gfx {
     icon_fmts: HashMap<u32, IDWriteTextFormat>,
     /// Palette brushes are created once instead of once per drawn primitive.
     brushes: HashMap<u32, ID2D1SolidColorBrush>,
+    /// Vertical gradients keyed by the (top, bottom) colour pair. The brush is
+    /// created in unit space and transformed per rectangle, so one brush
+    /// serves every card / banner of the same palette.
+    gradients: RefCell<HashMap<(u32, u32), ID2D1LinearGradientBrush>>,
     layouts: HashMap<LayoutKey, TextLayout>,
     ellipsis: HashMap<(u32, bool), IDWriteInlineObject>,
     line_heights: HashMap<(u32, bool), f32>,
@@ -264,6 +283,7 @@ impl Gfx {
                 formats: HashMap::new(),
                 icon_fmts: HashMap::new(),
                 brushes,
+                gradients: RefCell::new(HashMap::new()),
                 layouts: HashMap::with_capacity(256),
                 ellipsis: HashMap::new(),
                 line_heights: HashMap::new(),
@@ -310,6 +330,7 @@ impl Gfx {
                     self.brushes.insert(c.key(), b);
                 }
             }
+            self.gradients.borrow_mut().clear();
             // Bitmaps and layouts belong to the old target / factory state.
             self.icons.clear();
             self.icon_order.clear();
@@ -349,6 +370,7 @@ impl Gfx {
         self.dark = dark;
         self.pal = palette(dark);
         self.brushes.clear();
+        self.gradients.borrow_mut().clear();
         for c in self.pal.all() {
             unsafe {
                 if let Ok(b) = self.rt.CreateSolidColorBrush(&c.d2(), None) {
@@ -472,6 +494,112 @@ impl Gfx {
         if let Some(b) = self.brush(c) {
             unsafe { self.rt.DrawRectangle(&r, b, width, None) };
         }
+    }
+
+    /// Vertical two-stop gradient. The brush lives in unit space, so moving or
+    /// resizing the rectangle never needs a new brush — just a new transform.
+    pub fn vgradient(&self, r: D2D_RECT_F, radius: f32, top: Color, bottom: Color) {
+        let Some(brush) = self.gradient(top, bottom) else {
+            self.round(r, radius, bottom);
+            return;
+        };
+        let h = (r.bottom - r.top).max(0.001);
+        let m = Matrix3x2 {
+            M11: 1.0,
+            M12: 0.0,
+            M21: 0.0,
+            M22: h,
+            M31: r.left,
+            M32: r.top,
+        };
+        unsafe {
+            brush.SetTransform(&m);
+            let rr = D2D1_ROUNDED_RECT {
+                rect: r,
+                radiusX: radius,
+                radiusY: radius,
+            };
+            self.rt.FillRoundedRectangle(&rr, &brush);
+        }
+    }
+
+    fn gradient(&self, top: Color, bottom: Color) -> Option<ID2D1LinearGradientBrush> {
+        let key = (top.key(), bottom.key());
+        if let Some(g) = self.gradients.borrow().get(&key) {
+            return Some(g.clone());
+        }
+        unsafe {
+            let stops = [
+                D2D1_GRADIENT_STOP {
+                    position: 0.0,
+                    color: top.d2(),
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 1.0,
+                    color: bottom.d2(),
+                },
+            ];
+            let coll = self
+                .rt
+                .CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
+                .ok()?;
+            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                startPoint: Vector2 { X: 0.0, Y: 0.0 },
+                endPoint: Vector2 { X: 0.0, Y: 1.0 },
+            };
+            let brush = self
+                .rt
+                .CreateLinearGradientBrush(&props, None, &coll)
+                .ok()?;
+            self.gradients.borrow_mut().insert(key, brush.clone());
+            Some(brush)
+        }
+    }
+
+    /// Soft drop shadow built from three expanding rounded rectangles. Direct2D
+    /// has no blur primitive for primitives, and a real shadow effect would
+    /// cost a layer per card; three translucent bands are indistinguishable at
+    /// this scale and stay cheap when a page holds 25 cards.
+    pub fn shadow(&self, r: D2D_RECT_F, radius: f32, alpha: f32) {
+        if alpha <= 0.0 {
+            return;
+        }
+        for i in 0..3 {
+            let e = (i as f32 + 1.0) * 2.0;
+            let dy = (i as f32 + 1.0) * 1.1;
+            let a = (alpha * (0.55 - i as f32 * 0.11)).max(0.0);
+            self.round(
+                rect(r.left - e, r.top - e + dy, r.right + e, r.bottom + e + dy),
+                radius + e,
+                Color(0.0, 0.0, 0.0, a),
+            );
+        }
+    }
+
+    /// Offset every following primitive; paired with `reset_transform`. Used
+    /// for the short slide that plays when the user changes page.
+    pub fn translate(&self, x: f32, y: f32) {
+        let m = Matrix3x2 {
+            M11: 1.0,
+            M12: 0.0,
+            M21: 0.0,
+            M22: 1.0,
+            M31: x,
+            M32: y,
+        };
+        unsafe { self.rt.SetTransform(&m) };
+    }
+
+    pub fn reset_transform(&self) {
+        let m = Matrix3x2 {
+            M11: 1.0,
+            M12: 0.0,
+            M21: 0.0,
+            M22: 1.0,
+            M31: 0.0,
+            M32: 0.0,
+        };
+        unsafe { self.rt.SetTransform(&m) };
     }
 
     /// Clip scrolling content to the content pane so long descriptions can

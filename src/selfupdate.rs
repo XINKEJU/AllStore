@@ -50,7 +50,7 @@ pub fn current() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// `0.14.1` / `v0.14.1` / `0.14.1-beta` -> (0, 14, 1). Pre-release suffixes are
+/// `0.14.2` / `v0.14.2` / `0.14.2-beta` -> (0, 14, 2). Pre-release suffixes are
 /// ignored: a beta tag must not outrank the matching final release.
 fn parse_version(tag: &str) -> Option<(u32, u32, u32)> {
     let t = tag.trim().trim_start_matches(['v', 'V']);

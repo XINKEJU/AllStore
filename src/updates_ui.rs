@@ -18,7 +18,7 @@ use crate::app::{
     STATUS_H, TOP_H, WM_APP_UPDATE_DONE, WM_APP_UPDATE_PROGRESS, draw_button, in_rect, post,
 };
 use crate::downloads::{DlState, Progress, fmt_size};
-use crate::gfx;
+use crate::gfx::{self, Color};
 use crate::installed::{self, Installed, Inventory};
 use crate::net;
 use crate::update::{self, UpdateItem};
@@ -865,8 +865,14 @@ impl AppState {
 
         if rows.is_empty() && (!self.update_checking || viewing_ignored) {
             let card = gfx::rect(NAV_W + PAD, TOP_H + 108.0, w - PAD, TOP_H + 224.0);
-            self.gfx.round(card, 16.0, p.accent_soft);
-            self.gfx.outline(card, p.border, 0.8);
+            self.gfx.shadow(card, 16.0, 0.08);
+            self.gfx.vgradient(
+                card,
+                16.0,
+                p.accent_soft.mix(p.accent, 0.12),
+                p.accent_soft.mix(p.card, 0.20),
+            );
+            self.gfx.outline(card, p.accent.with_alpha(0.18), 0.9);
             self.gfx.text(
                 if viewing_ignored {
                     "没有被忽略的应用"
@@ -919,7 +925,12 @@ impl AppState {
             let icon = gfx::rect(r.left + 16.0, r.top + 16.0, r.left + 68.0, r.top + 68.0);
             let key = u.logo.as_deref().unwrap_or("");
             if !self.gfx.bitmap(key, icon) {
-                self.gfx.round(icon, 12.0, p.accent_soft);
+                self.gfx.vgradient(
+                    icon,
+                    12.0,
+                    p.accent_soft.mix(Color(1.0, 1.0, 1.0, 1.0), 0.10),
+                    p.accent_soft,
+                );
                 let ch: String = u.name.chars().take(1).collect();
                 self.gfx.center_text(&ch, icon, 22, true, p.accent);
             }

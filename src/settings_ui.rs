@@ -538,6 +538,7 @@ impl AppState {
             true,
             p.sub,
         );
+        self.gfx.shadow(l.src_card, 14.0, 0.06);
         self.gfx.round(l.src_card, 14.0, p.card);
         self.gfx.outline(l.src_card, p.border, 0.8);
         for (i, row) in l.toggle_rows.iter().enumerate() {
@@ -597,6 +598,7 @@ impl AppState {
             true,
             p.sub,
         );
+        self.gfx.shadow(l.custom_card, 14.0, 0.06);
         self.gfx.round(l.custom_card, 14.0, p.card);
         self.gfx.outline(l.custom_card, p.border, 0.8);
         self.draw_field(
@@ -691,6 +693,7 @@ impl AppState {
             true,
             p.sub,
         );
+        self.gfx.shadow(l.dir_card, 14.0, 0.06);
         self.gfx.round(l.dir_card, 14.0, p.card);
         self.gfx.outline(l.dir_card, p.border, 0.8);
         let dir_row = gfx::rect(
@@ -844,6 +847,7 @@ impl AppState {
             true,
             p.sub,
         );
+        self.gfx.shadow(l.about_card, 14.0, 0.06);
         self.gfx.round(l.about_card, 14.0, p.card);
         self.gfx.outline(l.about_card, p.border, 0.8);
         self.gfx.text(

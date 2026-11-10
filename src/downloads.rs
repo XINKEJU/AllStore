@@ -1057,6 +1057,7 @@ impl AppState {
         if panel.right <= panel.left + 320.0 {
             return;
         }
+        self.gfx.shadow(panel, 14.0, 0.07);
         self.gfx.round(panel, 14.0, p.card);
         self.gfx.outline(panel, p.border, 0.8);
         let l = panel.left + 16.0;
@@ -1382,7 +1383,12 @@ impl AppState {
             let icon = gfx::rect(r.left + 16.0, r.top + 22.0, r.left + 72.0, r.top + 78.0);
             let key = t.logo.as_deref().unwrap_or("");
             if !self.gfx.bitmap(key, icon) {
-                self.gfx.round(icon, 12.0, p.accent_soft);
+                self.gfx.vgradient(
+                    icon,
+                    12.0,
+                    p.accent_soft.mix(Color(1.0, 1.0, 1.0, 1.0), 0.10),
+                    p.accent_soft,
+                );
                 let ch: String = t.name.chars().take(1).collect();
                 self.gfx.center_text(&ch, icon, 22, true, p.accent);
             }

@@ -32,7 +32,6 @@ pub const WM_APP_UPDATE_PROGRESS: u32 = 0x8000 + 7;
 pub const WM_APP_UPDATE_DONE: u32 = 0x8000 + 8;
 pub const WM_APP_DL_PROGRESS: u32 = 0x8000 + 9;
 pub const WM_APP_DL_DONE: u32 = 0x8000 + 10;
-pub const WM_APP_VERIFY: u32 = 0x8000 + 11;
 pub const WM_APP_FALLBACK: u32 = 0x8000 + 12;
 /// Single 500 ms clock for caret blink and speed-graph sampling.
 pub const TIMER_ID: usize = 1;
@@ -108,7 +107,6 @@ pub enum Payload {
     },
     Detail(Result<Detail, String>, u64),
     /// Download links that answered 404/410 and must leave the catalog.
-    Verified(Vec<String>),
     /// A failed download with a replacement link found on another source.
     Fallback {
         id: u64,
@@ -691,88 +689,6 @@ impl AppState {
     /// Fixed-width chips keep the hit-test independent of glyph metrics.
     fn source_chip_rects(&self, w: f32) -> Vec<(D2D_RECT_F, Option<String>)> {
         source_chips(w, &self.sources, &self.source_counts)
-    }
-
-    /// Drop the entries whose download link was already proven dead, and
-    /// return the links that still need a HEAD probe this session.
-    fn split_unchecked_links(&mut self, apps: Vec<App>) -> (Vec<App>, Vec<String>) {
-        let cache = crate::source::UrlCheck::load();
-        let mut todo: Vec<String> = Vec::new();
-        let mut keep: Vec<App> = Vec::with_capacity(apps.len());
-        let mut dropped = 0usize;
-        for a in apps {
-            let url = a.download_url();
-            // Lenovo links are generated per request (dlservice?softid=…) and
-            // answer a HEAD poorly, so probing them says nothing about whether
-            // the app installs. Every other source ships a static CDN object.
-            if a.origin() == crate::source::LENOVO || url.is_empty() {
-                keep.push(a);
-                continue;
-            }
-            match cache.verdict(&url) {
-                Some(false) => dropped += 1,
-                Some(true) => keep.push(a),
-                None => {
-                    if !todo.contains(&url) {
-                        todo.push(url);
-                    }
-                    keep.push(a);
-                }
-            }
-        }
-        if dropped > 0 {
-            self.status = format!("已隐藏 {} 个失效下载链接", dropped);
-        }
-        (keep, todo)
-    }
-
-    /// Probe the unchecked links in the background; losers are posted back so
-    /// the catalog can shed them once, without blocking start-up.
-    fn spawn_link_check(&self, urls: Vec<String>) {
-        if urls.is_empty() {
-            return;
-        }
-        let h = self.hwnd_usize();
-        std::thread::spawn(move || {
-            let results = crate::source::probe_urls(urls);
-            let mut cache = crate::source::UrlCheck::load();
-            let mut dead: Vec<String> = Vec::new();
-            for (url, ok) in &results {
-                cache.record(url, *ok);
-                if !*ok {
-                    dead.push(url.clone());
-                }
-            }
-            cache.save();
-            net::log(&format!(
-                "LINKS probed={} dead={}",
-                results.len(),
-                dead.len()
-            ));
-            if !dead.is_empty() {
-                post(h, WM_APP_VERIFY, Payload::Verified(dead));
-            }
-        });
-    }
-
-    /// Remove rows whose package is gone from the store and every source.
-    fn drop_dead_links(&mut self, dead: &[String]) {
-        let n = dead.len();
-        let alive = |a: &App| {
-            let url = a.download_url();
-            !dead.iter().any(|d| d == &url)
-        };
-        self.home.retain(alive);
-        self.catalog_all.retain(alive);
-        // Removing every other row un-mixes the list, so re-run the round
-        // robin and rebuild the chip counts.
-        self.home = crate::source::interleave(self.home.clone());
-        self.catalog_all = crate::source::interleave(self.catalog_all.clone());
-        self.recompute_sources();
-        self.apply_source_filter();
-        self.queue_icons();
-        self.status = format!("已移除 {} 个下载链接失效的应用", n);
-        self.invalidate();
     }
 
     pub(crate) fn invalidate(&self) {
@@ -2465,7 +2381,6 @@ impl AppState {
             }
             WM_APP_DATA
             | WM_APP_LIST
-            | WM_APP_VERIFY
             | WM_APP_FALLBACK
             | WM_APP_ICON
             | WM_APP_DETAIL
@@ -2495,22 +2410,17 @@ impl AppState {
                 ));
                 self.token = token;
                 self.load_nav(&classes);
-                let (apps, to_probe) = self.split_unchecked_links(apps);
-                // Filtering un-mixes the round robin, so restore it before the
-                // first paint.
-                let apps = crate::source::interleave(apps);
+                // The catalog already probed and repaired every third-party
+                // link on its worker thread, so what arrives here is usable
+                // as-is (and still round-robin mixed).
                 self.home = apps.clone();
                 self.set_apps(apps, "推荐应用");
-                self.spawn_link_check(to_probe);
             }
             (WM_APP_DATA, Payload::Data(Err(e))) => {
                 net::log(&format!("DATA err {}", e));
                 self.loading = false;
                 self.status = format!("连接失败：{}（检查网络后重启）", e);
                 self.invalidate();
-            }
-            (WM_APP_VERIFY, Payload::Verified(dead)) => {
-                self.drop_dead_links(&dead);
             }
             (WM_APP_FALLBACK, Payload::Fallback { id, url }) => {
                 self.on_fallback(id, url);
@@ -2650,7 +2560,10 @@ pub fn start_load(hwnd_usize: usize) {
                     Payload::Status(format!("正在聚合软件源 {}/{}…", d, t)),
                 );
             };
-            let merged = crate::source::catalog(&token, &mut progress);
+            let mut note = |text: &str| {
+                post(hwnd_usize, WM_APP_STATUS, Payload::Status(text.to_string()));
+            };
+            let merged = crate::source::catalog(&token, &mut progress, &mut note);
             if merged.apps.is_empty() {
                 return Err(if merged.warnings.is_empty() {
                     "无法获取应用目录".to_string()

@@ -1595,7 +1595,8 @@ mod tests {
 
     #[test]
     fn legacy_error_snapshots_are_rewritten_on_restore() {
-        let legacy = "服务器返回 HTTP 404（{\"errorcode\":-46628,\"errormsg\":\"file not found\"}）";
+        let legacy =
+            "服务器返回 HTTP 404（{\"errorcode\":-46628,\"errormsg\":\"file not found\"}）";
         let clean = sanitize_error(legacy);
         assert_eq!(clean, "下载地址已失效（HTTP 404）");
         // Already-readable and non-HTTP failures must survive verbatim.
@@ -1639,8 +1640,10 @@ mod tests {
             "https://webcdn.m.qq.com/x.exe",
             "写入磁盘失败：磁盘空间不足"
         ));
-        assert!(!link_retryable(true, "https://webcdn.m.qq.com/x.exe", dead),
-            "a second failure must be final");
+        assert!(
+            !link_retryable(true, "https://webcdn.m.qq.com/x.exe", dead),
+            "a second failure must be final"
+        );
 
         assert!(
             !link_retryable(

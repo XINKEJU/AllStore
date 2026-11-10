@@ -88,7 +88,8 @@ pub fn save_cache(cache: &Cache) {
 /// (its warning is logged) instead of aborting the whole check, so the store
 /// still opens when one feed is down.
 fn catalog(token: &str, progress: &mut dyn FnMut(usize, usize)) -> Result<Vec<App>, String> {
-    let merged = crate::source::catalog(token, progress);
+    let mut quiet = |_: &str| {};
+    let merged = crate::source::catalog(token, progress, &mut quiet);
     net::log(&format!(
         "CATALOG merged={} sources={:?}",
         merged.apps.len(),

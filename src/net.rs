@@ -319,10 +319,8 @@ fn one(
             Some(b) => (Some(b.as_ptr() as *const c_void), b.len() as u32),
             None => (None, 0),
         };
-        WinHttpSendRequest(request, None, ptr, len, len, 0)
-            .map_err(|e| transport_err(&e))?;
-        WinHttpReceiveResponse(request, std::ptr::null_mut())
-            .map_err(|e| transport_err(&e))?;
+        WinHttpSendRequest(request, None, ptr, len, len, 0).map_err(|e| transport_err(&e))?;
+        WinHttpReceiveResponse(request, std::ptr::null_mut()).map_err(|e| transport_err(&e))?;
 
         let status = query_status(request);
         let content_length = query_header(request, WINHTTP_QUERY_CONTENT_LENGTH)
@@ -730,8 +728,15 @@ mod tests {
         let body = br#"{"errorcode":-46628,"errormsg":"file not found"}"#;
         let msg = friendly_http_error(404, body);
         assert!(msg.contains("下载地址已失效"), "{}", msg);
-        assert!(msg.contains("HTTP 404"), "status code stays for retry logic");
-        assert!(!msg.contains("errorcode"), "raw JSON must not leak: {}", msg);
+        assert!(
+            msg.contains("HTTP 404"),
+            "status code stays for retry logic"
+        );
+        assert!(
+            !msg.contains("errorcode"),
+            "raw JSON must not leak: {}",
+            msg
+        );
 
         // Plain-text bodies are short and useful enough to keep.
         assert_eq!(
@@ -790,7 +795,8 @@ mod tests {
     #[test]
     #[ignore = "requires live network"]
     fn live_tencent_stream_delivers_bytes() {
-        let url = "https://webcdn.m.qq.com/spcmgr/download/28160-110820-XYLinkClient-3.3.30.9093.exe";
+        let url =
+            "https://webcdn.m.qq.com/spcmgr/download/28160-110820-XYLinkClient-3.3.30.9093.exe";
         let mut got = 0usize;
         let mut total = 0u64;
         let r = fetch_binary_stream_resume(
@@ -802,7 +808,12 @@ mod tests {
             },
             &mut |n: u64, _partial: bool| total = n,
         );
-        println!("stream result={:?} bytes={} total={}", r.is_ok(), got, total);
+        println!(
+            "stream result={:?} bytes={} total={}",
+            r.is_ok(),
+            got,
+            total
+        );
         assert!(got > 100_000, "no bytes arrived");
     }
 

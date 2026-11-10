@@ -176,6 +176,245 @@ pub fn probe_urls(urls: Vec<String>) -> Vec<(String, bool)> {
         .unwrap_or_default()
 }
 
+/// A replacement installer for a row whose original link rotted, learned once
+/// and kept on disk so later launches skip both the probe and the search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Mirror {
+    url: String,
+    ts: u64,
+}
+
+/// `name -> working installer`, written by [`repair_links`].
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Mirrors {
+    #[serde(default)]
+    map: std::collections::HashMap<String, Mirror>,
+}
+
+/// A mirror found two weeks ago may itself be gone; re-resolve then.
+const MIRROR_TTL: u64 = 14 * 24 * 3600;
+
+fn mirror_path() -> Option<PathBuf> {
+    let base = std::env::var("LOCALAPPDATA").ok()?;
+    Some(PathBuf::from(base).join("MindosShop").join("mirrors.json"))
+}
+
+impl Mirrors {
+    pub fn load() -> Self {
+        let Some(p) = mirror_path() else {
+            return Self::default();
+        };
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&str> {
+        let m = self.map.get(name)?;
+        (now_secs().saturating_sub(m.ts) < MIRROR_TTL).then_some(m.url.as_str())
+    }
+
+    pub fn put(&mut self, name: &str, url: &str) {
+        self.map.insert(
+            name.to_string(),
+            Mirror {
+                url: url.to_string(),
+                ts: now_secs(),
+            },
+        );
+    }
+
+    pub fn save(&self) {
+        let Some(p) = mirror_path() else { return };
+        let now = now_secs();
+        let mut pruned = Mirrors::default();
+        for (name, m) in &self.map {
+            if now.saturating_sub(m.ts) < MIRROR_TTL {
+                pruned.map.insert(name.clone(), m.clone());
+            }
+        }
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(s) = serde_json::to_string(&pruned) {
+            let _ = std::fs::write(p, s);
+        }
+    }
+}
+
+/// What [`repair_links`] did, for the log line and the status bar.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RepairStats {
+    /// Links that had no verdict yet and were HEAD-probed this run.
+    pub probed: usize,
+    /// Links that answered 4xx/5xx or refused to resolve.
+    pub dead: usize,
+    /// Dead links replaced by another source's copy of the same software.
+    pub rehomed: usize,
+    /// Dead links nobody else carried, so the row was removed.
+    pub dropped: usize,
+}
+
+/// Turn "the catalog lies about download links" into "every row downloads".
+///
+/// Tencent's list API still advertises installers that their CDN deleted years
+/// ago — roughly a third of its rows. Their own web page is equally broken for
+/// those, so there is no fresher endpoint to ask: the only reliable answer is
+/// to look the software up on another source and keep that link instead.
+///
+/// Probes and lookups are concurrent and both answers are cached
+/// (`urlcheck.json` / `mirrors.json`), so only the first launch pays the cost.
+pub fn repair_links(token: &str, apps: &mut Vec<App>, note: &mut dyn FnMut(&str)) -> RepairStats {
+    let mut check = UrlCheck::load();
+    let mut mirrors = Mirrors::load();
+    let mut stats = RepairStats::default();
+
+    // Lenovo links are minted per request, so probing them is pointless.
+    let mut unknown: Vec<String> = Vec::new();
+    for a in apps.iter() {
+        if a.origin() == LENOVO {
+            continue;
+        }
+        let url = a.download_url();
+        if check.verdict(&url).is_none() {
+            unknown.push(url);
+        }
+    }
+    if !unknown.is_empty() {
+        note(&format!("正在校验 {} 条下载链接…", unknown.len()));
+        stats.probed = unknown.len();
+        for (url, ok) in probe_urls(unknown) {
+            check.record(&url, ok);
+        }
+    }
+
+    // Apply what we already know, then look up whatever is still unexplained.
+    // Only third-party rows need a lookup; Lenovo repairs itself from its id.
+    let mut replacements: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut unresolved: Vec<String> = Vec::new();
+    for a in apps.iter() {
+        if a.origin() == LENOVO || check.verdict(&a.download_url()) != Some(false) {
+            continue;
+        }
+        match mirrors.get(&a.name) {
+            Some(url) => {
+                replacements.insert(a.name.clone(), url.to_string());
+            }
+            None => unresolved.push(a.name.clone()),
+        }
+    }
+    unresolved.sort();
+    unresolved.dedup();
+
+    if !unresolved.is_empty() {
+        note(&format!(
+            "正在为 {} 个失效链接寻找替代安装包…",
+            unresolved.len()
+        ));
+        const WORKERS: usize = 8;
+        let found = std::sync::Mutex::new(std::collections::HashMap::<String, String>::new());
+        let found_r = &found;
+        std::thread::scope(|scope| {
+            for chunk in unresolved.chunks(WORKERS) {
+                scope.spawn(move || {
+                    for name in chunk {
+                        // Prefer a result from a source that hosts its own
+                        // packages; another Tencent row would likely be just as
+                        // stale.
+                        let hit = net::search(token, name).ok().and_then(|list| {
+                            let mut fallback = None;
+                            for x in list {
+                                let url = x.download_url();
+                                if url.is_empty() {
+                                    continue;
+                                }
+                                if x.origin() != TENCENT {
+                                    return Some(url);
+                                }
+                                fallback.get_or_insert(url);
+                            }
+                            fallback
+                        });
+                        if let Some(url) = hit
+                            && let Ok(mut f) = found_r.lock()
+                        {
+                            f.insert(name.clone(), url);
+                        }
+                    }
+                });
+            }
+        });
+        for (name, url) in found.into_inner().unwrap_or_default() {
+            mirrors.put(&name, &url);
+            replacements.insert(name, url);
+        }
+    }
+
+    // Swap live links in, drop the rows that have no usable installer left.
+    let (kept, rehomed, dropped) = apply_repairs(
+        std::mem::take(apps),
+        &|a| check.verdict(&a.download_url()) == Some(false),
+        &replacements,
+    );
+    *apps = kept;
+    stats.rehomed = rehomed;
+    stats.dropped = dropped;
+    stats.dead = rehomed + dropped;
+
+    check.save();
+    mirrors.save();
+    if stats.dead > 0 {
+        net::log(&format!(
+            "REPAIR probed={} dead={} rehomed={} dropped={}",
+            stats.probed, stats.dead, stats.rehomed, stats.dropped
+        ));
+    }
+    stats
+}
+
+/// The mechanical half of [`repair_links`], split out so the swap/drop rules
+/// can be tested without a network: every row the caller marks dead either gets
+/// a replacement link (keeping its name/icon/category) or disappears.
+///
+/// Lenovo rows never need a lookup: when their vendor-supplied `dl_a` rots, the
+/// store can mint its own `dlservice?softid=` link from the id it already has.
+fn apply_repairs(
+    apps: Vec<App>,
+    is_dead: &dyn Fn(&App) -> bool,
+    replacements: &std::collections::HashMap<String, String>,
+) -> (Vec<App>, usize, usize) {
+    let mut kept = Vec::with_capacity(apps.len());
+    let mut rehomed = 0usize;
+    let mut dropped = 0usize;
+    for mut a in apps {
+        if !is_dead(&a) {
+            kept.push(a);
+            continue;
+        }
+        if a.origin() == LENOVO {
+            // Clearing both slots makes `download_url()` fall back to the
+            // softid link, which the store mints on demand.
+            a.dl_a = None;
+            a.dl_b = None;
+            rehomed += 1;
+            kept.push(a);
+            continue;
+        }
+        match replacements.get(&a.name) {
+            Some(url) => {
+                a.dl_a = Some(url.clone());
+                a.dl_b = None;
+                rehomed += 1;
+                kept.push(a);
+            }
+            None => dropped += 1,
+        }
+    }
+    (kept, rehomed, dropped)
+}
+
 fn settings_path() -> Option<PathBuf> {
     let base = std::env::var("LOCALAPPDATA").ok()?;
     Some(PathBuf::from(base).join("MindosShop").join("sources.json"))
@@ -200,8 +439,13 @@ pub struct Catalog {
 }
 
 /// Fetch every enabled source and merge the results. `progress(done, total)`
-/// counts requests so the UI can show a determinate bar during start-up.
-pub fn catalog(token: &str, progress: &mut dyn FnMut(usize, usize)) -> Catalog {
+/// counts requests so the UI can show a determinate bar during start-up, while
+/// `note(text)` carries the free-form stage line ("正在校验 227 条下载链接…").
+pub fn catalog(
+    token: &str,
+    progress: &mut dyn FnMut(usize, usize),
+    note: &mut dyn FnMut(&str),
+) -> Catalog {
     let settings = load_settings();
     let on = |name: &str| !settings.disabled.iter().any(|d| d == name);
     let mut jobs: Vec<String> = Vec::new();
@@ -251,10 +495,21 @@ pub fn catalog(token: &str, progress: &mut dyn FnMut(usize, usize)) -> Catalog {
         progress(done, total);
     }
 
+    // Every row must have a link that answers before it reaches the UI: the
+    // catalog's own `url` fields are not trustworthy on their own.
+    let mut merged = dedup(out);
+    let repair = repair_links(token, &mut merged, note);
+    if repair.dropped > 0 {
+        warnings.push(format!(
+            "{} 个应用没有可用的下载地址，已隐藏",
+            repair.dropped
+        ));
+    }
+
     // Concatenating the sources keeps Lenovo's 300+ rows in front, which makes
     // "全部源" look identical to "联想" on the first screen. Round-robin the
     // sources instead so the mixed list is visibly mixed.
-    let merged = interleave(dedup(out));
+    let merged = interleave(merged);
     Catalog {
         apps: merged,
         sources,
@@ -677,13 +932,168 @@ mod tests {
         assert!(list.iter().any(|a| a.logo.is_some()));
     }
 
+    fn row(name: &str, source: &str, url: &str) -> App {
+        App {
+            id: "T1".into(),
+            name: name.into(),
+            introduction: None,
+            version: Some("1.0".into()),
+            size: None,
+            downloads: None,
+            score: None,
+            logo: None,
+            dl_a: Some(url.into()),
+            dl_b: Some("https://webcdn.m.qq.com/old.exe".into()),
+            is_advert: None,
+            source: Some(source.into()),
+            desc: None,
+            category: None,
+        }
+    }
+
+    #[test]
+    fn dead_rows_swap_in_a_mirror_and_keep_their_identity() {
+        let apps = vec![
+            row("腾讯QQ", TENCENT, "https://webcdn.m.qq.com/gone.exe"),
+            row("微信", TENCENT, "https://webcdn.m.qq.com/ok.exe"),
+            row(
+                "千问",
+                LENOVO,
+                "https://pc-store.lenovomm.cn/dlservice?softid=L1",
+            ),
+        ];
+        let dead_urls = ["https://webcdn.m.qq.com/gone.exe"];
+        let mut repl = std::collections::HashMap::new();
+        repl.insert(
+            "腾讯QQ".to_string(),
+            "https://pc-store.lenovomm.cn/dl?softid=L9".to_string(),
+        );
+        let (kept, rehomed, dropped) = apply_repairs(
+            apps,
+            &|a| dead_urls.contains(&a.download_url().as_str()),
+            &repl,
+        );
+        assert_eq!((rehomed, dropped), (1, 0));
+        assert_eq!(kept.len(), 3);
+        let qq = kept.iter().find(|a| a.name == "腾讯QQ").unwrap();
+        // The row keeps its Tencent identity but now points at a live file...
+        assert_eq!(qq.origin(), TENCENT);
+        assert_eq!(
+            qq.download_url(),
+            "https://pc-store.lenovomm.cn/dl?softid=L9"
+        );
+        // ...and the stale secondary link cannot come back to life.
+        assert!(qq.dl_b.is_none());
+    }
+
+    #[test]
+    fn a_dead_lenovo_vendor_link_falls_back_to_the_softid_link() {
+        // Lenovo's rows sometimes carry the vendor's own CDN link, which rots
+        // exactly like Tencent's. No lookup is needed: the id is enough.
+        let mut a = row("千问", LENOVO, "https://vendor.example.com/gone.exe");
+        a.id = "L123".into();
+        let (kept, rehomed, dropped) =
+            apply_repairs(vec![a], &|_| true, &std::collections::HashMap::new());
+        assert_eq!((rehomed, dropped), (1, 0));
+        assert_eq!(
+            kept[0].download_url(),
+            format!("{}/dlservice/download?softid=L123", crate::model::BASE)
+        );
+    }
+
+    #[test]
+    fn dead_rows_without_a_mirror_are_dropped() {
+        let apps = vec![
+            row("无人收录", TENCENT, "https://webcdn.m.qq.com/gone.exe"),
+            row("微信", TENCENT, "https://webcdn.m.qq.com/ok.exe"),
+        ];
+        let (kept, rehomed, dropped) = apply_repairs(
+            apps,
+            &|a| a.download_url().contains("gone"),
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!((rehomed, dropped), (0, 1));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].name, "微信");
+    }
+
+    /// Live measurement: of the Tencent links that answer 4xx, how many can be
+    /// replaced by the same software on another source? Run with
+    /// `cargo test -- --ignored live_rehome_coverage --nocapture`.
+    #[test]
+    #[ignore = "requires live network"]
+    fn live_rehome_coverage() {
+        use std::time::Instant;
+
+        let token = net::register().expect("token");
+        let list = tencent().expect("tencent feed");
+        let all: Vec<App> = list;
+        let urls: Vec<String> = all.iter().map(|a| a.download_url()).collect();
+        let t0 = Instant::now();
+        let verdicts = probe_urls(urls);
+        let probe_secs = t0.elapsed().as_secs_f32();
+
+        let dead: Vec<&App> = all
+            .iter()
+            .filter(|a| {
+                verdicts
+                    .iter()
+                    .find(|(u, _)| *u == a.download_url())
+                    .is_some_and(|(_, ok)| !ok)
+            })
+            .collect();
+        println!(
+            "tencent={} dead={} probe={:.1}s",
+            all.len(),
+            dead.len(),
+            probe_secs
+        );
+
+        // Eight workers, same shape as the startup repair.
+        let t1 = Instant::now();
+        let hits = std::sync::atomic::AtomicUsize::new(0);
+        let missing = std::sync::Mutex::new(Vec::<String>::new());
+        let (hits_r, missing_r, token_r) = (&hits, &missing, &token);
+        std::thread::scope(|s| {
+            for chunk in dead.chunks(8) {
+                s.spawn(move || {
+                    for a in chunk {
+                        let hit = net::search(token_r, &a.name)
+                            .ok()
+                            .and_then(|r| r.into_iter().find(|x| !x.download_url().is_empty()));
+                        match hit {
+                            Some(x) => {
+                                hits_r.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                println!("REHOME {} -> {} ({})", a.name, x.name, x.origin());
+                            }
+                            None => missing_r.lock().unwrap().push(a.name.clone()),
+                        }
+                    }
+                });
+            }
+        });
+        let hits = hits.load(std::sync::atomic::Ordering::Relaxed);
+        println!(
+            "re-homed {}/{} in {:.1}s; no replacement: {:?}",
+            hits,
+            dead.len(),
+            t1.elapsed().as_secs_f32(),
+            missing.lock().unwrap()
+        );
+        assert!(
+            hits > dead.len() / 2,
+            "re-homing must rescue most dead rows"
+        );
+    }
+
     /// Live check that the merged catalog is strictly larger than Lenovo alone.
     #[test]
     #[ignore = "requires live network"]
     fn live_catalog_merges_sources() {
         let token = net::register().expect("token");
         let mut progress = |_, _| {};
-        let c = catalog(&token, &mut progress);
+        let mut note = |_: &str| {};
+        let c = catalog(&token, &mut progress, &mut note);
         println!(
             "merged={} sources={:?} warnings={:?}",
             c.apps.len(),

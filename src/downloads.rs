@@ -55,6 +55,11 @@ pub(crate) fn link_retryable(already_failed_over: bool, url: &str, err: &str) ->
     if already_failed_over || url.contains("lenovomm.cn") {
         return false;
     }
+    // A GitHub repository can stop publishing installers (or ship only a
+    // source tarball); other sources may still carry the software.
+    if url.starts_with("gh:") {
+        return true;
+    }
     // Third-party links die in two ways: the CDN answers 4xx/5xx, or the host
     // stops resolving / refuses the connection (Tencent's older objects are
     // mostly the second kind). Local failures — disk full, paused, cancelled —
@@ -542,6 +547,24 @@ impl AppState {
         self.save_downloads();
         self.invalidate();
         std::thread::spawn(move || {
+            // A GitHub row ships `gh:owner/repo` instead of an address: the
+            // repository's current asset only exists at download time, so the
+            // resolver runs here rather than during catalog building.
+            let mut url = url;
+            if url.starts_with("gh:") {
+                post(
+                    h,
+                    crate::app::WM_APP_STATUS,
+                    Payload::Status(format!("正在解析 {} 的最新安装包…", name)),
+                );
+                match crate::source::resolve_github(&url) {
+                    Ok(real) => url = real,
+                    Err(e) => {
+                        post(h, WM_APP_DL_DONE, Payload::DlDone { id, result: Err(e) });
+                        return;
+                    }
+                }
+            }
             // Transient failures (server hiccup, Wi-Fi roam) are common for
             // multi-hundred-MB installers. Retry twice with backoff; every
             // attempt resumes from the `.part` left by the previous one, so a

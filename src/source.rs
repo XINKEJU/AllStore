@@ -270,10 +270,11 @@ pub fn repair_links(token: &str, apps: &mut Vec<App>, note: &mut dyn FnMut(&str)
     let mut mirrors = Mirrors::load();
     let mut stats = RepairStats::default();
 
-    // Lenovo links are minted per request, so probing them is pointless.
+    // Lenovo links are minted per request, and a GitHub row carries a promise
+    // (`gh:owner/repo`) rather than an address, so neither can be probed.
     let mut unknown: Vec<String> = Vec::new();
     for a in apps.iter() {
-        if a.origin() == LENOVO {
+        if a.origin() == LENOVO || a.is_lazy_link() {
             continue;
         }
         let url = a.download_url();
@@ -295,7 +296,10 @@ pub fn repair_links(token: &str, apps: &mut Vec<App>, note: &mut dyn FnMut(&str)
         std::collections::HashMap::new();
     let mut unresolved: Vec<String> = Vec::new();
     for a in apps.iter() {
-        if a.origin() == LENOVO || check.verdict(&a.download_url()) != Some(false) {
+        if a.origin() == LENOVO
+            || a.is_lazy_link()
+            || check.verdict(&a.download_url()) != Some(false)
+        {
             continue;
         }
         match mirrors.get(&a.name) {
@@ -455,6 +459,9 @@ pub fn catalog(
     if on(TENCENT) {
         jobs.push(TENCENT.into());
     }
+    if on(GITHUB) {
+        jobs.push(GITHUB.into());
+    }
     for c in &settings.custom {
         if on(&c.name) {
             jobs.push(c.name.clone());
@@ -473,6 +480,8 @@ pub fn catalog(
             lenovo(token)
         } else if name == TENCENT {
             tencent()
+        } else if name == GITHUB {
+            github()
         } else {
             match settings.custom.iter().find(|c| &c.name == name) {
                 Some(c) => custom(c),
@@ -563,8 +572,10 @@ pub fn dedup(list: Vec<App>) -> Vec<App> {
             continue;
         }
         // Lenovo rows can omit both URL fields and still be downloadable via
-        // the dlservice fallback; every other source must ship a real link.
+        // the dlservice fallback; a GitHub row holds a `gh:` spec that is
+        // resolved at download time. Everything else must ship a real link.
         let linked = a.id.starts_with('L')
+            || a.is_lazy_link()
             || [&a.dl_a, &a.dl_b]
                 .into_iter()
                 .flatten()
@@ -706,6 +717,327 @@ fn tencent() -> Result<Vec<App>, String> {
         });
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// GitHub releases — the open-source shelf
+// ---------------------------------------------------------------------------
+
+pub const GITHUB: &str = "GitHub";
+
+/// One line of the built-in open-source catalogue.
+///
+/// The list lives in `assets/github.json` and is compiled into the binary, so
+/// the shelf paints instantly and costs zero requests. Every repo in it was
+/// checked to publish a `.exe`/`.msi` in its latest release; the *link* is not
+/// stored because GitHub's asset URLs carry a version — it is resolved the
+/// first time somebody downloads, then cached for a day.
+#[derive(Debug, Deserialize)]
+struct GhSeed {
+    repo: String,
+    name: String,
+    cat: String,
+    desc: String,
+}
+
+const GH_SEEDS: &str = include_str!("../assets/github.json");
+
+fn github() -> Result<Vec<App>, String> {
+    let seeds: Vec<GhSeed> =
+        serde_json::from_str(GH_SEEDS).map_err(|e| format!("内置开源清单损坏：{}", e))?;
+    let mut out = Vec::with_capacity(seeds.len());
+    for s in seeds {
+        let owner = s.repo.split('/').next().unwrap_or_default();
+        out.push(App {
+            id: format!("G{:016x}", hash(&s.repo)),
+            name: s.name,
+            // Owner avatar doubles as the icon and needs no API call.
+            logo: Some(format!("https://github.com/{}.png?size=96", owner)),
+            desc: Some(s.desc),
+            category: Some(s.cat),
+            dl_a: Some(format!("gh:{}", s.repo)),
+            source: Some(GITHUB.into()),
+            ..Default::default()
+        });
+    }
+    if out.is_empty() {
+        return Err("内置清单为空".into());
+    }
+    Ok(out)
+}
+
+/// File-name fragments that disqualify an asset: signatures, checksums,
+/// sources, other architectures and packages that cannot be double-clicked.
+const ASSET_BLOCK: [&str; 22] = [
+    ".sig",
+    ".sha",
+    ".asc",
+    "checksums",
+    "arm64",
+    "arm-64",
+    "arm_64",
+    "aarch64",
+    "armv7",
+    "win-arm",
+    "windows-arm",
+    "symbols",
+    "debug",
+    ".pdb",
+    ".nupkg",
+    ".zip",
+    ".7z",
+    ".msix",
+    ".txt",
+    ".json",
+    ".blockmap",
+    "source",
+];
+
+const ASSET_64: [&str; 7] = [
+    "x64", "amd64", "win64", "x86_64", "x86-64", "64-bit", "64bit",
+];
+const ASSET_32: [&str; 8] = [
+    "win32", "i386", "i686", "ia32", "32bit", "32-bit", "x86.exe", "x86.msi",
+];
+const ASSET_INSTALL: [&str; 3] = ["setup", "installer", "install"];
+const ASSET_MEH: [&str; 4] = ["portable", "-cli", "_cli", "patch"];
+
+/// Pick the one asset a user would double-click out of a release's file list.
+///
+/// Pure so it can be unit-tested without a network: the same rule decides what
+/// the download resolves to and what the verifier would have chosen.
+pub(crate) fn pick_windows_asset<'a>(names: &[&'a str], app: &str) -> Option<&'a str> {
+    let key: String = app
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let mut best: Option<(&'a str, f32)> = None;
+    for name in names {
+        let low = name.to_ascii_lowercase();
+        if !(low.ends_with(".exe") || low.ends_with(".msi")) {
+            continue;
+        }
+        if ASSET_BLOCK.iter().any(|b| low.contains(b)) || is_delta_patch(&low) {
+            continue;
+        }
+        let mut s = 0.0f32;
+        if ASSET_64.iter().any(|g| low.contains(g)) {
+            s += 4.0;
+        }
+        if ASSET_32.iter().any(|b| low.contains(b)) {
+            s -= 5.0;
+        }
+        if ASSET_INSTALL.iter().any(|g| low.contains(g)) {
+            s += 3.0;
+        }
+        if low.ends_with(".msi") {
+            s += 1.0;
+        }
+        let flat: String = low.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        if !key.is_empty() && flat.contains(&key) {
+            s += 3.0;
+        }
+        if ASSET_MEH.iter().any(|b| low.contains(b)) {
+            s -= 3.0;
+        }
+        // Shorter names are usually the canonical build.
+        s -= low.len() as f32 / 200.0;
+        if best.is_none_or(|(_, bs)| s > bs) {
+            best = Some((name, s));
+        }
+    }
+    best.map(|(n, _)| n)
+}
+
+/// `1061to1064.exe` is an in-place updater, not an installer.
+fn is_delta_patch(low: &str) -> bool {
+    let b = low.as_bytes();
+    b.windows(3)
+        .any(|w| w[0].is_ascii_digit() && w[1].eq_ignore_ascii_case(&b't') && w[2].is_ascii_digit())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GhResolved {
+    url: String,
+    #[serde(default)]
+    tag: String,
+    ts: u64,
+}
+
+/// Repo → installer URL, so a second click on the same card costs nothing.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct GhCache {
+    #[serde(default)]
+    items: std::collections::HashMap<String, GhResolved>,
+}
+
+const GH_TTL: u64 = 24 * 3600;
+
+fn gh_path() -> Option<PathBuf> {
+    let base = std::env::var("LOCALAPPDATA").ok()?;
+    Some(PathBuf::from(base).join("MindosShop").join("github.json"))
+}
+
+impl GhCache {
+    fn load() -> Self {
+        let Some(p) = gh_path() else {
+            return Self::default();
+        };
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+    fn save(&self) {
+        let Some(p) = gh_path() else { return };
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(s) = serde_json::to_string(self) {
+            let _ = std::fs::write(p, s);
+        }
+    }
+}
+
+fn gh_headers() -> [(&'static str, String); 2] {
+    [
+        ("User-Agent", "MindosShop".into()),
+        ("Accept", "application/vnd.github+json".into()),
+    ]
+}
+
+/// Turn `gh:owner/repo` into today's installer.
+///
+/// Two roads to the same answer: the REST API resolves in one round trip but
+/// the anonymous quota is 60/h, while the release page's asset fragment needs
+/// two requests and has no quota. API first, page as the fallback — and the
+/// answer is cached for a day either way.
+pub fn resolve_github(spec: &str) -> Result<String, String> {
+    let repo = spec.strip_prefix("gh:").unwrap_or(spec).trim();
+    if !repo.contains('/') {
+        return Err(format!("无法识别的开源地址：{}", spec));
+    }
+    let mut cache = GhCache::load();
+    if let Some(e) = cache.items.get(repo)
+        && now_secs().saturating_sub(e.ts) < GH_TTL
+        && !e.url.is_empty()
+    {
+        return Ok(e.url.clone());
+    }
+    let (url, tag) = gh_latest_asset(repo).map_err(|e| {
+        net::log(&format!("GH {} FAIL {}", repo, e));
+        e
+    })?;
+    cache.items.insert(
+        repo.to_string(),
+        GhResolved {
+            url: url.clone(),
+            tag,
+            ts: now_secs(),
+        },
+    );
+    cache.save();
+    net::log(&format!("GH {} -> {}", repo, url));
+    Ok(url)
+}
+
+fn gh_latest_asset(repo: &str) -> Result<(String, String), String> {
+    if let Ok(v) = net::get_json_with(
+        &format!("https://api.github.com/repos/{}/releases/latest", repo),
+        &gh_headers(),
+    ) {
+        let tag = v
+            .get("tag_name")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let assets: Vec<(String, String)> = v
+            .get("assets")
+            .and_then(|a| a.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|a| {
+                Some((
+                    a.get("name")?.as_str()?.to_string(),
+                    a.get("browser_download_url")?.as_str()?.to_string(),
+                ))
+            })
+            .collect();
+        let names: Vec<&str> = assets.iter().map(|(n, _)| n.as_str()).collect();
+        let leaf = repo.rsplit('/').next().unwrap_or(repo);
+        return match pick_windows_asset(&names, leaf) {
+            Some(pick) => {
+                let (_, url) = assets
+                    .iter()
+                    .find(|(n, _)| n == pick)
+                    .ok_or("资产列表不一致")?;
+                Ok((url.clone(), tag))
+            }
+            None if assets.is_empty() => Err("该版本没有任何附件".into()),
+            None => Err("最新版本没有 Windows 安装包".into()),
+        };
+    }
+    gh_scrape(repo)
+}
+
+/// Fallback: the release page redirects to `/releases/tag/<tag>`, and the
+/// asset list lives in the `releases/expanded_assets/<tag>` fragment.
+fn gh_scrape(repo: &str) -> Result<(String, String), String> {
+    let hdrs = gh_headers();
+    let page = net::get_with(
+        &format!("https://github.com/{}/releases/latest", repo),
+        &hdrs,
+    )?;
+    let tag = page
+        .final_url
+        .split_once("/releases/tag/")
+        .map(|(_, t)| t.split(['?', '#']).next().unwrap_or(t).to_string())
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| "该仓库还没有发布版本".to_string())?;
+    let frag = net::get_with(
+        &format!(
+            "https://github.com/{}/releases/expanded_assets/{}",
+            repo,
+            tag.replace(' ', "%20")
+        ),
+        &hdrs,
+    )?;
+    let html = String::from_utf8_lossy(&frag.bytes);
+    let hrefs = release_hrefs(&html);
+    let names: Vec<(&str, &str)> = hrefs
+        .iter()
+        .map(|h| (h.rsplit('/').next().unwrap_or(h), h.as_str()))
+        .collect();
+    let flat: Vec<&str> = names.iter().map(|(n, _)| *n).collect();
+    let leaf = repo.rsplit('/').next().unwrap_or(repo);
+    let pick = pick_windows_asset(&flat, leaf).ok_or("最新版本没有 Windows 安装包")?;
+    let (_, href) = names
+        .iter()
+        .find(|(n, _)| *n == pick)
+        .ok_or("资产列表不一致")?;
+    let url = if href.starts_with("http") {
+        href.to_string()
+    } else {
+        format!("https://github.com{}", href)
+    };
+    Ok((url, tag))
+}
+
+/// Every `href` in a fragment that points at a release asset.
+fn release_hrefs(html: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some(i) = rest.find("href=\"") {
+        rest = &rest[i + "href=\"".len()..];
+        let Some(end) = rest.find('"') else { break };
+        let href = &rest[..end];
+        if href.contains("/releases/download/") && !out.iter().any(|h| h == href) {
+            out.push(href.to_string());
+        }
+        rest = &rest[end..];
+    }
+    out
 }
 
 /// A custom feed is a JSON array (or `{"apps":[...]}`) whose entries use the
@@ -1104,5 +1436,125 @@ mod tests {
             c.sources.contains(&LENOVO.to_string()) && c.sources.contains(&TENCENT.to_string())
         );
         assert!(c.apps.len() > 400);
+    }
+
+    /// The sidebar is built from Lenovo's class list, so a row whose category
+    /// is not one of those names never shows up under a category at all.
+    #[test]
+    fn every_open_source_seed_uses_a_real_category() {
+        let cats: Vec<&str> = TENCNET_CATEGORIES.iter().map(|(_, c)| *c).collect();
+        let seeds: Vec<GhSeed> = serde_json::from_str(GH_SEEDS).expect("内置清单可解析");
+        assert!(seeds.len() >= 90, "清单过小：{}", seeds.len());
+        let mut seen = std::collections::HashSet::new();
+        for s in &seeds {
+            assert!(
+                cats.contains(&s.cat.as_str()),
+                "{} 的分类「{}」不在侧边栏里",
+                s.name,
+                s.cat
+            );
+            assert!(s.repo.contains('/'), "{} 缺少 owner/repo", s.name);
+            assert!(seen.insert(s.repo.to_lowercase()), "{} 重复", s.repo);
+            assert!(!s.desc.trim().is_empty() && !s.name.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_github_row_carries_its_spec_instead_of_a_link() {
+        let a = github().expect("内置清单可用");
+        let row = a
+            .iter()
+            .find(|x| x.name == "7-Zip")
+            .expect("7-Zip 在清单里");
+        assert_eq!(row.download_url(), "gh:ip7z/7zip");
+        assert!(row.is_lazy_link(), "解析型链接不该被 HEAD 探测");
+        assert_eq!(row.origin(), GITHUB);
+        assert!(row.logo_url().is_some_and(|u| u.contains("github.com")));
+    }
+
+    /// Release pages mix installers with signatures, deltas, ARM builds and
+    /// portable archives; picking the wrong one means a button that does
+    /// nothing when double-clicked.
+    #[test]
+    fn picks_the_installer_and_skips_noise() {
+        let cases: [(&[&str], &str, &str); 4] = [
+            (
+                &[
+                    "app-1.0-x64.exe",
+                    "app-1.0-x64.exe.sig",
+                    "app-1.0-win-arm64.exe",
+                    "app-1.0-x64.exe.sha256",
+                ],
+                "App",
+                "app-1.0-x64.exe",
+            ),
+            (
+                &[
+                    "LocalSend-CLI-1.18.2-windows-arm-64.exe",
+                    "LocalSend-1.18.2-setup.exe",
+                ],
+                "LocalSend",
+                "LocalSend-1.18.2-setup.exe",
+            ),
+            (
+                &["1061to1064.exe", "Playnite-Setup-1.0-x64.exe"],
+                "Playnite",
+                "Playnite-Setup-1.0-x64.exe",
+            ),
+            (
+                &[
+                    "tool-portable.exe",
+                    "tool-setup-x86.exe",
+                    "tool-setup-x64.exe",
+                ],
+                "tool",
+                "tool-setup-x64.exe",
+            ),
+        ];
+        for (names, app, want) in cases {
+            assert_eq!(pick_windows_asset(names, app), Some(want), "{app}");
+        }
+    }
+
+    #[test]
+    fn installers_only_are_considered() {
+        // A repository that ships nothing but source archives has no row the
+        // installer can run, so the picker must say "nothing" rather than
+        // hand back a tarball.
+        assert_eq!(
+            pick_windows_asset(&["src-1.0.zip", "src-1.0.tar.gz", "notes.txt"], "x"),
+            None
+        );
+        assert_eq!(pick_windows_asset(&[], "x"), None);
+    }
+
+    #[test]
+    fn release_fragments_are_scanned_for_asset_links() {
+        let html = r#"<a href="/o/r/releases/download/v1/a.exe">a</a>
+            <a href="/o/r/releases/download/v1/b.msi">b</a>
+            <a href="/o/r/releases/tag/v1">tag</a>"#;
+        let hrefs = release_hrefs(html);
+        assert_eq!(hrefs.len(), 2);
+        assert!(hrefs[0].ends_with("/a.exe"));
+    }
+
+    /// Merging drops rows without a usable link; a `gh:` spec *is* a usable
+    /// link, just a deferred one — treating it as missing hid the whole shelf.
+    #[test]
+    fn a_lazy_github_row_survives_the_merge() {
+        let list = dedup(vec![
+            App {
+                id: "G0001".into(),
+                name: "Zed".into(),
+                dl_a: Some("gh:zed-industries/zed".into()),
+                source: Some(GITHUB.into()),
+                ..Default::default()
+            },
+            app("Zed", "https://webcdn.m.qq.com/zed.exe"),
+            app("Solo", "https://webcdn.m.qq.com/solo.exe"),
+        ]);
+        assert_eq!(list.len(), 2, "开源行不该被当成「没有链接」删掉");
+        assert_eq!(list[0].download_url(), "gh:zed-industries/zed");
+        assert!(list[0].is_lazy_link());
     }
 }

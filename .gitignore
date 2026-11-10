@@ -1,8 +1,6 @@
 /target/
 /evidence/
-/tools/
 /dist/
-*.py
 *.pyc
 *.log
 *.pdb
@@ -14,3 +12,7 @@ real-identity.json
 *identity*.json
 node_modules/
 /.workbuddy/
+# Python helpers stay untracked, except the GitHub shelf verifier — it is the
+# recipe that produced assets/github.json and has to ship with the source.
+*.py
+!/tools/verify_github.py

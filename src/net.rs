@@ -648,6 +648,19 @@ pub fn fetch_json(url: &str) -> Result<serde_json::Value, String> {
     serde_json::from_slice(&body).map_err(|e| format!("JSON：{}", e))
 }
 
+/// GET with caller-chosen headers, keeping the final URL. GitHub's
+/// `releases/latest` answers with a redirect whose path *is* the tag, so the
+/// resolved address matters as much as the body.
+pub fn get_with(url: &str, headers: &[(&str, String)]) -> Result<HttpResponse, String> {
+    request("GET", url, headers, &[], None, None, None)
+}
+
+/// Same, parsed as JSON (GitHub's API rejects requests with no User-Agent).
+pub fn get_json_with(url: &str, headers: &[(&str, String)]) -> Result<serde_json::Value, String> {
+    let body = get_with(url, headers)?.bytes;
+    serde_json::from_slice(&body).map_err(|e| format!("JSON：{}", e))
+}
+
 /// Metadata returned after a streamed package download. The final URL lets the
 /// caller pick a truthful file extension instead of blindly writing `.exe`.
 pub struct Fetch {

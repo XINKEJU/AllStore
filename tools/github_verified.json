@@ -1,0 +1,970 @@
+[
+ {
+  "repo": "ip7z/7zip",
+  "name": "7-Zip",
+  "cat": "解压刻录",
+  "desc": "高压缩率的开源压缩与解压工具",
+  "version": "26.06",
+  "asset": "7z2606-x64.msi"
+ },
+ {
+  "repo": "peazip/PeaZip",
+  "name": "PeaZip",
+  "cat": "解压刻录",
+  "desc": "支持两百多种格式的开源压缩管理器",
+  "version": "11.4.0",
+  "asset": "peazip-11.4.0.WIN64.exe"
+ },
+ {
+  "repo": "pbatard/rufus",
+  "name": "Rufus",
+  "cat": "解压刻录",
+  "desc": "制作可启动 U 盘的小巧工具",
+  "version": "v4.15",
+  "asset": "rufus-4.15.exe"
+ },
+ {
+  "repo": "balena-io/etcher",
+  "name": "balenaEtcher",
+  "cat": "解压刻录",
+  "desc": "跨平台的镜像写入工具",
+  "version": "v2.1.9",
+  "asset": "balenaEtcher-2.1.9.Setup.exe"
+ },
+ {
+  "repo": "microsoft/PowerToys",
+  "name": "PowerToys",
+  "cat": "系统工具",
+  "desc": "微软官方 Windows 效率工具集",
+  "version": "v0.102.3101",
+  "asset": "PowerToysSetup-0.102.3101.0-x64.exe"
+ },
+ {
+  "repo": "winsiderss/systeminformer",
+  "name": "System Informer",
+  "cat": "系统工具",
+  "desc": "进程、句柄与系统的深度监视器",
+  "version": "v4.0.26241.138",
+  "asset": "systeminformer-4.0.26241.138-release-setup.exe"
+ },
+ {
+  "repo": "sabrogden/Ditto",
+  "name": "Ditto",
+  "cat": "系统工具",
+  "desc": "剪贴板历史记录管理器",
+  "version": "3.25.113.0",
+  "asset": "DittoSetup_3_25_113_0.exe"
+ },
+ {
+  "repo": "QL-Win/QuickLook",
+  "name": "QuickLook",
+  "cat": "系统工具",
+  "desc": "按空格键快速预览文件",
+  "version": "4.5.0",
+  "asset": "QuickLook-4.5.0.msi"
+ },
+ {
+  "repo": "rizonesoft/Notepad3",
+  "name": "Notepad3",
+  "cat": "办公教育",
+  "desc": "轻快省资源的文本编辑器",
+  "version": "RELEASE_7.26.602.1",
+  "asset": "Notepad3_7.26.602.1_x64_Setup.exe"
+ },
+ {
+  "repo": "notepad-plus-plus/notepad-plus-plus",
+  "name": "Notepad++",
+  "cat": "办公教育",
+  "desc": "经典开源文本与代码编辑器",
+  "version": "v8.9.9",
+  "asset": "npp.8.9.9.Installer.x64.msi"
+ },
+ {
+  "repo": "AutoHotkey/AutoHotkey",
+  "name": "AutoHotkey",
+  "cat": "系统工具",
+  "desc": "用脚本自动化日常操作",
+  "version": "v2.0.31",
+  "asset": "AutoHotkey_2.0.31_setup.exe"
+ },
+ {
+  "repo": "bleachbit/bleachbit",
+  "name": "BleachBit",
+  "cat": "系统工具",
+  "desc": "清理磁盘垃圾与隐私痕迹",
+  "version": "v6.0.6",
+  "asset": "BleachBit-6.0.6-setup.exe"
+ },
+ {
+  "repo": "Eugeny/tabby",
+  "name": "Tabby",
+  "cat": "系统工具",
+  "desc": "可高度定制的现代终端",
+  "version": "v1.0.238",
+  "asset": "tabby-1.0.238-setup-x64.exe"
+ },
+ {
+  "repo": "Maximus5/ConEmu",
+  "name": "ConEmu",
+  "cat": "系统工具",
+  "desc": "标签式终端与任务宿主",
+  "version": "v23.07.24",
+  "asset": "ConEmuSetup.230724.exe"
+ },
+ {
+  "repo": "debauchee/barrier",
+  "name": "Barrier",
+  "cat": "助手工具",
+  "desc": "一套键盘鼠标控制多台电脑",
+  "version": "v2.4.0",
+  "asset": "BarrierSetup-2.4.0-release.exe"
+ },
+ {
+  "repo": "deskflow/deskflow",
+  "name": "Deskflow",
+  "cat": "助手工具",
+  "desc": "跨设备共享键鼠与剪贴板",
+  "version": "v1.27.0",
+  "asset": "deskflow-1.27.0-win-x64.msi"
+ },
+ {
+  "repo": "localsend/localsend",
+  "name": "LocalSend",
+  "cat": "助手工具",
+  "desc": "局域网内跨设备传文件",
+  "version": "v1.18.2",
+  "asset": "LocalSend-1.18.2-windows-x86-64.exe"
+ },
+ {
+  "repo": "rustdesk/rustdesk",
+  "name": "RustDesk",
+  "cat": "助手工具",
+  "desc": "可自建服务器的开源远程桌面",
+  "version": "1.5.1",
+  "asset": "rustdesk-1.5.1-x86_64.msi"
+ },
+ {
+  "repo": "PowerShell/PowerShell",
+  "name": "PowerShell",
+  "cat": "编程软件",
+  "desc": "跨平台的微软脚本命令行",
+  "version": "v7.6.9",
+  "asset": "PowerShell-7.6.9-win-x64.msi"
+ },
+ {
+  "repo": "JanDeDobbeleer/oh-my-posh",
+  "name": "Oh My Posh",
+  "cat": "系统工具",
+  "desc": "给终端提示符换主题",
+  "version": "v32.0.0",
+  "asset": "posh-windows-amd64.exe"
+ },
+ {
+  "repo": "chrisant996/clink",
+  "name": "Clink",
+  "cat": "系统工具",
+  "desc": "让 cmd 拥有补全与历史",
+  "version": "v1.9.36",
+  "asset": "clink.1.9.36.af9152_setup.exe"
+ },
+ {
+  "repo": "doublecmd/doublecmd",
+  "name": "Double Commander",
+  "cat": "系统工具",
+  "desc": "双栏文件管理器",
+  "version": "v1.2.11",
+  "asset": "doublecmd-1.2.11.x86_64-win64.msi"
+ },
+ {
+  "repo": "FarGroup/FarManager",
+  "name": "Far Manager",
+  "cat": "系统工具",
+  "desc": "键盘流的经典文件管理器",
+  "version": "ci/v3.0.6751.5034",
+  "asset": "Far_3.0.6751.5034_x64_20261109_779f075.msi"
+ },
+ {
+  "repo": "hluk/CopyQ",
+  "name": "CopyQ",
+  "cat": "系统工具",
+  "desc": "带脚本的剪贴板管理器",
+  "version": "v17.0.0",
+  "asset": "copyq-17.0.0-setup.exe"
+ },
+ {
+  "repo": "Flow-Launcher/Flow.Launcher",
+  "name": "Flow Launcher",
+  "cat": "系统工具",
+  "desc": "键盘启动器与搜索",
+  "version": "v2.1.4",
+  "asset": "Flow-Launcher-Setup.exe"
+ },
+ {
+  "repo": "Armin2208/Windows-Auto-Night-Mode",
+  "name": "Auto Dark Mode",
+  "cat": "桌面美化",
+  "desc": "按时间自动切换深浅色主题",
+  "version": "11.1.1.1",
+  "asset": "AutoDarkMode_Setup_11.1.1.1_x86.exe"
+ },
+ {
+  "repo": "t1m0thyj/WinDynamicDesktop",
+  "name": "WinDynamicDesktop",
+  "cat": "桌面美化",
+  "desc": "跟随时间变化的动态壁纸",
+  "version": "v5.7.0",
+  "asset": "WinDynamicDesktop_5.7.0_x64_Setup.exe"
+ },
+ {
+  "repo": "rocksdanister/lively",
+  "name": "Lively Wallpaper",
+  "cat": "桌面美化",
+  "desc": "把视频与网页设为动态壁纸",
+  "version": "v2.2.1.0",
+  "asset": "lively_setup_x86_full_v2210.exe"
+ },
+ {
+  "repo": "rainmeter/rainmeter",
+  "name": "Rainmeter",
+  "cat": "桌面美化",
+  "desc": "桌面小部件与系统监控面板",
+  "version": "v4.5.28.3936",
+  "asset": "Rainmeter-4.5.28.exe"
+ },
+ {
+  "repo": "git-for-windows/git",
+  "name": "Git for Windows",
+  "cat": "编程软件",
+  "desc": "Windows 上的 Git 与命令行工具",
+  "version": "v2.56.0.windows.4",
+  "asset": "Git-2.56.0.4-64-bit.exe"
+ },
+ {
+  "repo": "desktop/desktop",
+  "name": "GitHub Desktop",
+  "cat": "编程软件",
+  "desc": "图形化的 Git 客户端",
+  "version": "release-3.6.10",
+  "asset": "GitHubDesktopSetup-x64.msi"
+ },
+ {
+  "repo": "dbeaver/dbeaver",
+  "name": "DBeaver",
+  "cat": "编程软件",
+  "desc": "通用数据库管理客户端",
+  "version": "26.2.4",
+  "asset": "dbeaver-ce-26.2.4-windows-x86_64.exe"
+ },
+ {
+  "repo": "HeidiSQL/HeidiSQL",
+  "name": "HeidiSQL",
+  "cat": "编程软件",
+  "desc": "轻量 MySQL 与 MariaDB 客户端",
+  "version": "v12.22",
+  "asset": "HeidiSQL_12.22.0.7382_Setup.exe"
+ },
+ {
+  "repo": "qishibo/AnotherRedisDesktopManager",
+  "name": "Another Redis Desktop",
+  "cat": "编程软件",
+  "desc": "Redis 图形化管理工具",
+  "version": "v1.7.4",
+  "asset": "Another-Redis-Desktop-Manager-win-1.7.4-x64.exe"
+ },
+ {
+  "repo": "usebruno/bruno",
+  "name": "Bruno",
+  "cat": "编程软件",
+  "desc": "离线优先的 API 调试工具",
+  "version": "v4.3.0",
+  "asset": "bruno_4.3.0_x64_win.msi"
+ },
+ {
+  "repo": "Kong/insomnia",
+  "name": "Insomnia",
+  "cat": "编程软件",
+  "desc": "API 设计与调试客户端",
+  "version": "core@13.4.0",
+  "asset": "Insomnia.Core-13.4.0.exe"
+ },
+ {
+  "repo": "wez/wezterm",
+  "name": "WezTerm",
+  "cat": "编程软件",
+  "desc": "GPU 加速的多路终端",
+  "version": "20240203-110809-5046fc22",
+  "asset": "WezTerm-20240203-110809-5046fc22-setup.exe"
+ },
+ {
+  "repo": "alacritty/alacritty",
+  "name": "Alacritty",
+  "cat": "编程软件",
+  "desc": "极简的 GPU 终端",
+  "version": "v0.17.0",
+  "asset": "Alacritty-v0.17.0-installer.msi"
+ },
+ {
+  "repo": "VSCodium/vscodium",
+  "name": "VSCodium",
+  "cat": "编程软件",
+  "desc": "去掉遥测的 VS Code 发行版",
+  "version": "1.143.17232",
+  "asset": "VSCodiumSetup-x64-1.143.17232.exe"
+ },
+ {
+  "repo": "zed-industries/zed",
+  "name": "Zed",
+  "cat": "编程软件",
+  "desc": "高性能协作代码编辑器",
+  "version": "v1.27.0",
+  "asset": "Zed-x86_64.exe"
+ },
+ {
+  "repo": "arduino/arduino-ide",
+  "name": "Arduino IDE",
+  "cat": "编程软件",
+  "desc": "Arduino 官方开发环境",
+  "version": "2.3.10",
+  "asset": "arduino-ide_2.3.10_Windows_64bit.msi"
+ },
+ {
+  "repo": "mRemoteNG/mRemoteNG",
+  "name": "mRemoteNG",
+  "cat": "系统工具",
+  "desc": "多协议远程连接管理器",
+  "version": "v1.76.20",
+  "asset": "mRemoteNG-Installer-1.76.20.24615.msi"
+ },
+ {
+  "repo": "WinMerge/winmerge",
+  "name": "WinMerge",
+  "cat": "办公教育",
+  "desc": "文件夹与文件差异对比",
+  "version": "v2.16.60",
+  "asset": "WinMerge-2.16.60-x64-Setup.exe"
+ },
+ {
+  "repo": "ONLYOFFICE/DesktopEditors",
+  "name": "ONLYOFFICE",
+  "cat": "办公教育",
+  "desc": "兼容 Office 格式的在线办公套件",
+  "version": "v10.0.0",
+  "asset": "DesktopEditors_x64.exe"
+ },
+ {
+  "repo": "laurent22/joplin",
+  "name": "Joplin",
+  "cat": "办公教育",
+  "desc": "端到端加密的开源笔记",
+  "version": "v3.7.22",
+  "asset": "Joplin-Setup-3.7.22.exe"
+ },
+ {
+  "repo": "logseq/logseq",
+  "name": "Logseq",
+  "cat": "办公教育",
+  "desc": "大纲式双链笔记",
+  "version": "2.0.2",
+  "asset": "Logseq-win-x64-2.0.2-nsis.exe"
+ },
+ {
+  "repo": "Zettlr/Zettlr",
+  "name": "Zettlr",
+  "cat": "办公教育",
+  "desc": "面向学者的 Markdown 写作台",
+  "version": "v4.9.0",
+  "asset": "Zettlr-4.9.0-x64.exe"
+ },
+ {
+  "repo": "kovidgoyal/calibre",
+  "name": "calibre",
+  "cat": "办公教育",
+  "desc": "电子书管理与格式转换",
+  "version": "v9.18.0",
+  "asset": "calibre-64bit-9.18.0.msi"
+ },
+ {
+  "repo": "ankitects/anki",
+  "name": "Anki",
+  "cat": "办公教育",
+  "desc": "基于间隔重复的记忆卡片",
+  "version": "26.09.4",
+  "asset": "anki-26.09.4-win-x64.msi"
+ },
+ {
+  "repo": "marktext/marktext",
+  "name": "MarkText",
+  "cat": "办公教育",
+  "desc": "简洁的 Markdown 编辑器",
+  "version": "v0.23.0",
+  "asset": "marktext-win-x64-0.23.0-setup.exe"
+ },
+ {
+  "repo": "ShareX/ShareX",
+  "name": "ShareX",
+  "cat": "图片图形",
+  "desc": "截图、录屏与一键上传",
+  "version": "v22.4.0",
+  "asset": "ShareX-22.4.0-setup-x64.exe"
+ },
+ {
+  "repo": "greenshot/greenshot",
+  "name": "Greenshot",
+  "cat": "图片图形",
+  "desc": "轻量截图与标注",
+  "version": "v1.3.328",
+  "asset": "Greenshot-INSTALLER-1.3.328-RELEASE.exe"
+ },
+ {
+  "repo": "flameshot-org/flameshot",
+  "name": "Flameshot",
+  "cat": "图片图形",
+  "desc": "功能丰富的截图标注工具",
+  "version": "v15.0.0",
+  "asset": "Flameshot-15.0.0-win64.msi"
+ },
+ {
+  "repo": "d2phap/ImageGlass",
+  "name": "ImageGlass",
+  "cat": "图片图形",
+  "desc": "轻快现代的图片查看器",
+  "version": "10.0.6.906",
+  "asset": "ImageGlass_10.0.6.906_win-x64.msi"
+ },
+ {
+  "repo": "PintaProject/Pinta",
+  "name": "Pinta",
+  "cat": "图片图形",
+  "desc": "简单易用的开源绘图软件",
+  "version": "3.1.2",
+  "asset": "Pinta-x86_64.exe"
+ },
+ {
+  "repo": "NickeManarin/ScreenToGif",
+  "name": "ScreenToGif",
+  "cat": "图片图形",
+  "desc": "把屏幕操作录成 GIF",
+  "version": "2.43.2",
+  "asset": "ScreenToGif.2.43.2.Setup.x64.msi"
+ },
+ {
+  "repo": "Molunerfinn/PicGo",
+  "name": "PicGo",
+  "cat": "图片图形",
+  "desc": "图床管理与一键上传",
+  "version": "v3.0.3",
+  "asset": "PicGo-3.0.3-x64.exe"
+ },
+ {
+  "repo": "sylikc/jpegview",
+  "name": "JPEGView",
+  "cat": "图片图形",
+  "desc": "启动极快的图片查看器",
+  "version": "v1.3.46",
+  "asset": "JPEGView32_en-us_1.3.46.msi"
+ },
+ {
+  "repo": "jurplel/qView",
+  "name": "qView",
+  "cat": "图片图形",
+  "desc": "极简无干扰的看图工具",
+  "version": "7.1",
+  "asset": "qView-7.1-win64.exe"
+ },
+ {
+  "repo": "Lymphatus/caesium-image-compressor",
+  "name": "Caesium",
+  "cat": "图片图形",
+  "desc": "批量无损压缩图片",
+  "version": "v2.8.5",
+  "asset": "caesium-image-compressor-2.8.5-win-setup.exe"
+ },
+ {
+  "repo": "clsid2/mpc-hc",
+  "name": "MPC-HC",
+  "cat": "视频软件",
+  "desc": "经典轻量影音播放器",
+  "version": "2.8.5",
+  "asset": "MPC-HC.2.8.5.x64.exe"
+ },
+ {
+  "repo": "obsproject/obs-studio",
+  "name": "OBS Studio",
+  "cat": "剪辑工具",
+  "desc": "直播推流与录制工作台",
+  "version": "33.0.1",
+  "asset": "OBS-Studio-33.0.1-Windows-x64-Installer.exe"
+ },
+ {
+  "repo": "HandBrake/HandBrake",
+  "name": "HandBrake",
+  "cat": "视频软件",
+  "desc": "开源视频转码工具",
+  "version": "1.11.2",
+  "asset": "HandBrake-1.11.2-x86_64-Win_GUI.exe"
+ },
+ {
+  "repo": "mltframework/shotcut",
+  "name": "Shotcut",
+  "cat": "剪辑工具",
+  "desc": "跨平台视频剪辑",
+  "version": "v26.9.27",
+  "asset": "shotcut-win64-26.9.27.exe"
+ },
+ {
+  "repo": "OpenShot/openshot-qt",
+  "name": "OpenShot",
+  "cat": "剪辑工具",
+  "desc": "简单直观的视频编辑器",
+  "version": "v4.1.1",
+  "asset": "OpenShot-v4.1.1-x86_64.exe"
+ },
+ {
+  "repo": "audacity/audacity",
+  "name": "Audacity",
+  "cat": "音乐软件",
+  "desc": "多轨音频录制与编辑",
+  "version": "Audacity-4.0.2",
+  "asset": "audacity-win-4.0.2-x86_64.msi"
+ },
+ {
+  "repo": "musescore/MuseScore",
+  "name": "MuseScore",
+  "cat": "音乐软件",
+  "desc": "打谱与乐谱编辑",
+  "version": "v4.7.6",
+  "asset": "MuseScore-Studio-4.7.6.261022093-x86_64.msi"
+ },
+ {
+  "repo": "lyswhut/lx-music-desktop",
+  "name": "洛雪音乐助手",
+  "cat": "音乐软件",
+  "desc": "多源聚合的音乐播放器",
+  "version": "v2.12.6",
+  "asset": "lx-music-desktop-v2.12.6-x64-Setup.exe"
+ },
+ {
+  "repo": "LMMS/lmms",
+  "name": "LMMS",
+  "cat": "音乐软件",
+  "desc": "免费的编曲与音乐制作",
+  "version": "v1.2.2",
+  "asset": "lmms-1.2.2-win64.exe"
+ },
+ {
+  "repo": "telegramdesktop/tdesktop",
+  "name": "Telegram Desktop",
+  "cat": "聊天社交",
+  "desc": "Telegram 官方桌面客户端",
+  "version": "v7.4.1",
+  "asset": "td-setup-win-x64-7.4.1.exe"
+ },
+ {
+  "repo": "mattermost/desktop",
+  "name": "Mattermost",
+  "cat": "聊天社交",
+  "desc": "团队协作与内部通讯",
+  "version": "v6.3.2",
+  "asset": "mattermost-desktop-6.3.2-win-x64.msi"
+ },
+ {
+  "repo": "RocketChat/Rocket.Chat.Electron",
+  "name": "Rocket.Chat",
+  "cat": "聊天社交",
+  "desc": "可自建的团队聊天",
+  "version": "4.19.2",
+  "asset": "rocketchat-4.19.2-win-x64.msi"
+ },
+ {
+  "repo": "ungoogled-software/ungoogled-chromium-windows",
+  "name": "ungoogled-chromium",
+  "cat": "浏览器",
+  "desc": "移除谷歌服务的 Chromium",
+  "version": "157.0.8103.38-1.1",
+  "asset": "ungoogled-chromium_157.0.8103.38-1.1_installer_x64.exe"
+ },
+ {
+  "repo": "zen-browser/desktop",
+  "name": "Zen Browser",
+  "cat": "浏览器",
+  "desc": "基于 Firefox 的专注浏览体验",
+  "version": "1.24.1b",
+  "asset": "zen.installer.exe"
+ },
+ {
+  "repo": "minbrowser/min",
+  "name": "Min",
+  "cat": "浏览器",
+  "desc": "轻量极简的浏览器",
+  "version": "v1.35.7",
+  "asset": "min-1.35.7-setup.exe"
+ },
+ {
+  "repo": "keepassxreboot/keepassxc",
+  "name": "KeePassXC",
+  "cat": "安全防护",
+  "desc": "离线密码管理器",
+  "version": "2.8.0",
+  "asset": "KeePassXC-2.8.0-x64.msi"
+ },
+ {
+  "repo": "bitwarden/clients",
+  "name": "Bitwarden",
+  "cat": "安全防护",
+  "desc": "开源密码与凭证管理",
+  "version": "desktop-v2026.10.4",
+  "asset": "Bitwarden-Installer-2026.10.4.exe"
+ },
+ {
+  "repo": "veracrypt/VeraCrypt",
+  "name": "VeraCrypt",
+  "cat": "安全防护",
+  "desc": "磁盘与分区加密",
+  "version": "VeraCrypt_1.26.31",
+  "asset": "VeraCrypt_Setup_x64_1.26.31.msi"
+ },
+ {
+  "repo": "henrypp/simplewall",
+  "name": "simplewall",
+  "cat": "安全防护",
+  "desc": "轻量 Windows 防火墙",
+  "version": "v.3.8.7",
+  "asset": "simplewall-3.8.7-setup.exe"
+ },
+ {
+  "repo": "sandboxie-plus/Sandboxie",
+  "name": "Sandboxie-Plus",
+  "cat": "安全防护",
+  "desc": "把程序关进沙盘运行",
+  "version": "v1.18.8",
+  "asset": "Sandboxie-Plus-x64-v1.18.8.exe"
+ },
+ {
+  "repo": "JosefNemec/Playnite",
+  "name": "Playnite",
+  "cat": "游戏",
+  "desc": "统一管理各平台游戏库",
+  "version": "10.64",
+  "asset": "Playnite1064.exe"
+ },
+ {
+  "repo": "PrismLauncher/PrismLauncher",
+  "name": "Prism Launcher",
+  "cat": "游戏",
+  "desc": "多实例的 Minecraft 启动器",
+  "version": "11.1.1",
+  "asset": "PrismLauncher-Windows-MSVC-Setup-11.1.1.exe"
+ },
+ {
+  "repo": "moonlight-stream/moonlight-qt",
+  "name": "Moonlight",
+  "cat": "游戏",
+  "desc": "串流自家电脑的游戏画面",
+  "version": "v6.2.0",
+  "asset": "MoonlightSetup-6.2.0.exe"
+ },
+ {
+  "repo": "LizardByte/Sunshine",
+  "name": "Sunshine",
+  "cat": "游戏",
+  "desc": "自建游戏串流服务器",
+  "version": "v2026.914.233613",
+  "asset": "Sunshine-Windows-AMD64-installer.msi"
+ },
+ {
+  "repo": "CherryHQ/cherry-studio",
+  "name": "Cherry Studio",
+  "cat": "助手工具",
+  "desc": "多模型 AI 桌面客户端",
+  "version": "v2.1.10",
+  "asset": "Cherry-Studio-2.1.10-win-x64-setup.exe"
+ },
+ {
+  "repo": "ollama/ollama",
+  "name": "Ollama",
+  "cat": "助手工具",
+  "desc": "本地运行大语言模型",
+  "version": "v0.40.16",
+  "asset": "OllamaSetup.exe"
+ },
+ {
+  "repo": "menloresearch/jan",
+  "name": "Jan",
+  "cat": "助手工具",
+  "desc": "离线优先的 AI 助手",
+  "version": "v0.8.8",
+  "asset": "Jan_0.8.8_x64-setup.exe"
+ },
+ {
+  "repo": "Mintplex-Labs/anything-llm",
+  "name": "AnythingLLM",
+  "cat": "助手工具",
+  "desc": "用自有文档搭建知识库问答",
+  "version": "v1.19.0",
+  "asset": "AnythingLLMDesktop.exe"
+ },
+ {
+  "repo": "lobehub/lobe-chat",
+  "name": "LobeChat",
+  "cat": "助手工具",
+  "desc": "开源 AI 对话界面",
+  "version": "v2.3.2",
+  "asset": "LobeHub-2.3.2-setup.exe"
+ },
+ {
+  "repo": "BeyondDimension/SteamTools",
+  "name": "Watt Toolkit",
+  "cat": "助手工具",
+  "desc": "Steam 社区加速与工具箱",
+  "version": "3.2.0",
+  "asset": "Steam++_v3.2.0_win_x64.exe"
+ },
+ {
+  "repo": "rime/weasel",
+  "name": "小狼毫输入法",
+  "cat": "输入法",
+  "desc": "高度可定制的开源输入法",
+  "version": "0.17.4",
+  "asset": "weasel-0.17.4.0-installer.exe"
+ },
+ {
+  "repo": "qbittorrent/qBittorrent",
+  "name": "qBittorrent",
+  "cat": "下载工具",
+  "desc": "无广告的 BT 下载工具",
+  "version": "release-5.3.0",
+  "asset": "qbittorrent_5.3.0_x64_setup.exe"
+ },
+ {
+  "repo": "transmission/transmission",
+  "name": "Transmission",
+  "cat": "下载工具",
+  "desc": "轻量跨平台 BT 客户端",
+  "version": "4.1.4",
+  "asset": "transmission-4.1.4-x64.msi"
+ },
+ {
+  "repo": "agalwood/Motrix",
+  "name": "Motrix",
+  "cat": "下载工具",
+  "desc": "全能 HTTP 与 BT 下载器",
+  "version": "v2.4.1",
+  "asset": "Motrix-Setup-2.4.1.exe"
+ },
+ {
+  "repo": "yt-dlp/yt-dlp",
+  "name": "yt-dlp",
+  "cat": "下载工具",
+  "desc": "从视频网站下载音视频",
+  "version": "2026.10.26",
+  "asset": "yt-dlp.exe"
+ },
+ {
+  "repo": "FreeCAD/FreeCAD",
+  "name": "FreeCAD",
+  "cat": "编程软件",
+  "desc": "参数化三维建模软件",
+  "version": "1.1.4",
+  "asset": "FreeCAD_1.1.4-Windows-x86_64-py311-installer.exe"
+ },
+ {
+  "repo": "beekeeper-studio/beekeeper-studio",
+  "name": "Beekeeper Studio",
+  "cat": "编程软件",
+  "desc": "跨库 SQL 客户端",
+  "version": "v6.2.2",
+  "asset": "Beekeeper-Studio-Setup-6.2.2.exe"
+ },
+ {
+  "repo": "icsharpcode/ILSpy",
+  "name": "ILSpy",
+  "cat": "编程软件",
+  "desc": ".NET 反编译工具",
+  "version": "v11.2",
+  "asset": "ILSpy_Installer_11.2.0.10050-x64.msi"
+ },
+ {
+  "repo": "siyuan-note/siyuan",
+  "name": "思源笔记",
+  "cat": "办公教育",
+  "desc": "本地优先的双链笔记",
+  "version": "v3.8.10",
+  "asset": "siyuan-3.8.10-win.exe"
+ },
+ {
+  "repo": "zulip/zulip-desktop",
+  "name": "Zulip",
+  "cat": "聊天社交",
+  "desc": "话题式团队聊天",
+  "version": "v5.14.2",
+  "asset": "Zulip-5.14.2-x64.msi"
+ },
+ {
+  "repo": "ferdium/ferdium-app",
+  "name": "Ferdium",
+  "cat": "聊天社交",
+  "desc": "把多个聊天服务并到一个窗口",
+  "version": "v7.2.3",
+  "asset": "Ferdium-win-AutoSetup-7.2.3-x64.exe"
+ },
+ {
+  "repo": "th-ch/youtube-music",
+  "name": "YouTube Music",
+  "cat": "音乐软件",
+  "desc": "带插件的桌面音乐客户端",
+  "version": "v3.12.0",
+  "asset": "YouTube-Music-Web-Setup-3.12.0.exe"
+ },
+ {
+  "repo": "SubtitleEdit/SubtitleEdit",
+  "name": "SubtitleEdit",
+  "cat": "剪辑工具",
+  "desc": "字幕编辑与翻译",
+  "version": "v5.4.0",
+  "asset": "SubtitleEdit-Windows-x64-Setup.exe"
+ },
+ {
+  "repo": "upscayl/upscayl",
+  "name": "Upscayl",
+  "cat": "图片图形",
+  "desc": "本地 AI 图片放大",
+  "version": "v2.15.0",
+  "asset": "upscayl-2.15.0-win.exe"
+ },
+ {
+  "repo": "qarmin/czkawka",
+  "name": "Czkawka",
+  "cat": "系统工具",
+  "desc": "查找重复文件与相似图片",
+  "version": "12.0.2",
+  "asset": "windows_czkawka_cli.exe"
+ },
+ {
+  "repo": "cryptomator/cryptomator",
+  "name": "Cryptomator",
+  "cat": "安全防护",
+  "desc": "云盘文件的透明加密",
+  "version": "1.19.6",
+  "asset": "Cryptomator-1.19.6-x64.msi"
+ },
+ {
+  "repo": "VRCX-team/VRCX",
+  "name": "VRCX",
+  "cat": "游戏",
+  "desc": "VRChat 好友与数据管理",
+  "version": "v2026.09.16",
+  "asset": "VRCX_2026.09.16_Setup.exe"
+ },
+ {
+  "repo": "jgraph/drawio-desktop",
+  "name": "draw.io",
+  "cat": "办公教育",
+  "desc": "流程图与架构图",
+  "version": "v32.6.10",
+  "asset": "draw.io-32.6.10-windows-installer.exe"
+ },
+ {
+  "repo": "AppFlowy-IO/AppFlowy",
+  "name": "AppFlowy",
+  "cat": "办公教育",
+  "desc": "开源协作笔记与看板",
+  "version": "0.15.0",
+  "asset": "AppFlowy-0.15.0-windows-x86_64.exe"
+ },
+ {
+  "repo": "toeverything/AFFiNE",
+  "name": "AFFiNE",
+  "cat": "办公教育",
+  "desc": "文档与白板一体的知识库",
+  "version": "v0.27.4",
+  "asset": "affine-0.27.4-stable-windows-x64.exe"
+ },
+ {
+  "repo": "pot-app/pot-desktop",
+  "name": "Pot",
+  "cat": "办公教育",
+  "desc": "划词翻译与 OCR",
+  "version": "3.0.7",
+  "asset": "pot_3.0.7_x64-setup.exe"
+ },
+ {
+  "repo": "hellzerg/optimizer",
+  "name": "Optimizer",
+  "cat": "系统工具",
+  "desc": "Windows 优化与隐私开关",
+  "version": "16.7",
+  "asset": "Optimizer-16.7.exe"
+ },
+ {
+  "repo": "Xournalpp/xournalpp",
+  "name": "Xournal++",
+  "cat": "办公教育",
+  "desc": "手写笔记与 PDF 批注",
+  "version": "v1.3.8",
+  "asset": "xournalpp-1.3.8-windows-setup-AMD64.exe"
+ },
+ {
+  "repo": "cli/cli",
+  "name": "GitHub CLI",
+  "cat": "编程软件",
+  "desc": "命令行操作 GitHub",
+  "version": "v2.103.3",
+  "asset": "gh_2.103.3_windows_amd64.msi"
+ },
+ {
+  "repo": "lapce/lapce",
+  "name": "Lapce",
+  "cat": "编程软件",
+  "desc": "Rust 编写的轻量编辑器",
+  "version": "v0.4.6",
+  "asset": "Lapce-windows.msi"
+ },
+ {
+  "repo": "nuttyartist/notes",
+  "name": "Notes",
+  "cat": "办公教育",
+  "desc": "简洁的 Markdown 笔记",
+  "version": "v2.3.1",
+  "asset": "NotesSetup_2.3.1.exe"
+ },
+ {
+  "repo": "Picocrypt/Picocrypt",
+  "name": "Picocrypt",
+  "cat": "安全防护",
+  "desc": "极简的文件加密工具",
+  "version": "1.49",
+  "asset": "Picocrypt.exe"
+ },
+ {
+  "repo": "Duplicati/duplicati",
+  "name": "Duplicati",
+  "cat": "系统工具",
+  "desc": "加密的增量备份",
+  "version": "v2.4.1.0_stable_2026-10-29",
+  "asset": "duplicati-2.4.1.0_stable_2026-10-29-win-x64-gui.msi"
+ },
+ {
+  "repo": "subhra74/xdm",
+  "name": "XDM",
+  "cat": "下载工具",
+  "desc": "多线程下载管理器",
+  "version": "v9.0.9",
+  "asset": "xdm-9.0.9-x64.msi"
+ },
+ {
+  "repo": "BluePointLilac/ContextMenuManager",
+  "name": "ContextMenuManager",
+  "cat": "系统工具",
+  "desc": "右键菜单管理器",
+  "version": "3.3.3.1",
+  "asset": "ContextMenuManager.NET.3.5.exe"
+ },
+ {
+  "repo": "MoeKoeMusic/MoeKoeMusic",
+  "name": "MoeKoe Music",
+  "cat": "音乐软件",
+  "desc": "多源聚合音乐播放器",
+  "version": "v1.7.2",
+  "asset": "MoeKoe_Music_Setup_v1.7.2-x64.exe"
+ }
+]

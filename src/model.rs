@@ -59,13 +59,19 @@ impl App {
     }
     pub fn download_url(&self) -> String {
         for u in [&self.dl_a, &self.dl_b] {
+            // `gh:owner/repo` is a promise, not an address: the installer is
+            // resolved when the user actually asks for it (see `source`).
             if let Some(s) = u
-                && s.starts_with("http")
+                && (s.starts_with("http") || s.starts_with("gh:"))
             {
                 return s.clone();
             }
         }
         format!("{}/dlservice/download?softid={}", BASE, self.id)
+    }
+    /// True when the link is a placeholder that must be resolved before use.
+    pub fn is_lazy_link(&self) -> bool {
+        self.download_url().starts_with("gh:")
     }
     pub fn score_text(&self) -> String {
         match &self.score {

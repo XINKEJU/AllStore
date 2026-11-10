@@ -56,6 +56,13 @@ fn clamp_placement(p: persist::WindowPlacement) -> (i32, i32, i32, i32) {
         GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect,
     };
     unsafe {
+        // The saved rectangle is in physical pixels from the last session. On a
+        // 125–150 % display the same 1100×720 is smaller than the 1000×620 DIP
+        // layout minimum, which squeezed every page (and made the settings
+        // cards overlap the right edge). Scale the minimum by the current DPI.
+        let dpi = GetDpiForSystem().max(96) as f32;
+        let min_w = (app::MIN_W as f32 * dpi / 96.0).round() as i32;
+        let min_h = (app::MIN_H as f32 * dpi / 96.0).round() as i32;
         let r = RECT {
             left: p.x,
             top: p.y,
@@ -69,8 +76,10 @@ fn clamp_placement(p: persist::WindowPlacement) -> (i32, i32, i32, i32) {
         };
         if GetMonitorInfoW(mon, &mut mi).as_bool() {
             let wa = mi.rcWork;
-            let w = p.w.min(wa.right - wa.left).max(640);
-            let h = p.h.min(wa.bottom - wa.top).max(480);
+            let max_w = wa.right - wa.left;
+            let max_h = wa.bottom - wa.top;
+            let w = p.w.clamp(min_w.min(max_w), max_w);
+            let h = p.h.clamp(min_h.min(max_h), max_h);
             let x = p.x.clamp(wa.left, (wa.right - w).max(wa.left));
             let y = p.y.clamp(wa.top, (wa.bottom - h).max(wa.top));
             return (x, y, w, h);
@@ -139,10 +148,17 @@ fn main() {
         toast::init();
 
         // Reopen where the user left the window, unless that monitor is gone.
+        // The default goes through the same clamp so it never lands below the
+        // layout minimum on a high-DPI display.
         let placement = persist::load_window();
-        let (win_x, win_y, win_w, win_h) = placement
-            .map(clamp_placement)
-            .unwrap_or((120, 90, 1100, 720));
+        let (win_x, win_y, win_w, win_h) =
+            clamp_placement(placement.unwrap_or(persist::WindowPlacement {
+                x: 120,
+                y: 90,
+                w: 1100,
+                h: 720,
+                maximized: false,
+            }));
 
         let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
 

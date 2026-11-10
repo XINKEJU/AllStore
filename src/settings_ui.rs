@@ -34,7 +34,20 @@ const HEADER_H: f32 = 30.0;
 const ROW: f32 = 54.0;
 const CARD_PAD: f32 = 8.0;
 const SECTION_GAP: f32 = 26.0;
+/// Single horizontal inset shared by every card, so labels, buttons and fields
+/// line up on one vertical grid instead of drifting 16/20 px apart.
+const INSET: f32 = 20.0;
+/// Width of the label column in a two-column row ("下载目录", "同时下载"…).
+const LABEL_W: f32 = 150.0;
+/// Gap between the label column and the control column.
+const COL_GAP: f32 = 20.0;
 const CONCURRENCY: [usize; 4] = [1, 2, 3, 5];
+const THEME_LABELS: [&str; 3] = ["跟随系统", "浅色", "深色"];
+/// "跟随系统" is the only three-glyph label, so it gets its own width; the
+/// other two share the narrow one used by the concurrency chips.
+const THEME_W: [f32; 3] = [84.0, 64.0, 64.0];
+// A theme chip without a label used to index past the end of the label array.
+const _: () = assert!(THEME_LABELS.len() == THEME_W.len());
 
 struct Layout {
     x0: f32,
@@ -68,10 +81,14 @@ fn chip(x: f32, y: f32, w: f32) -> D2D_RECT_F {
 }
 
 fn layout(st: &AppState) -> Layout {
-    let w = st.width as f32;
+    layout_at(st.width as f32, st.scroll as f32, st.settings.custom.len())
+}
+
+/// Pure geometry, split out from `AppState` so the alignment rules below can be
+/// asserted in unit tests without a window or a Direct2D device.
+fn layout_at(w: f32, scroll: f32, custom: usize) -> Layout {
     let x0 = NAV_W + PAD;
     let x1 = (w - PAD).max(x0 + 340.0);
-    let scroll = st.scroll as f32;
     // Title + subtitle occupy the top of the page.
     let mut y = TOP_H + 78.0 - scroll;
 
@@ -92,35 +109,29 @@ fn layout(st: &AppState) -> Layout {
 
     let custom_header_y = y;
     y += HEADER_H;
-    let add_name = gfx::rect(
-        x0 + 16.0,
-        y + CARD_PAD + 8.0,
-        (x0 + 16.0 + 180.0).min(x1 - 420.0),
-        y + CARD_PAD + 8.0 + 36.0,
-    );
+    let add_top = y + CARD_PAD + 8.0;
+    let add_bottom = add_top + 36.0;
+    let add_left = x0 + INSET;
+    let add_right = x1 - INSET;
+    let add_btn = gfx::rect(add_right - 88.0, add_top, add_right, add_bottom);
+    let add_name = gfx::rect(add_left, add_top, add_left + 200.0, add_bottom);
     let add_url = gfx::rect(
         add_name.right + 10.0,
-        add_name.top,
-        x1 - 16.0 - 96.0,
-        add_name.bottom,
+        add_top,
+        add_btn.left - 10.0,
+        add_bottom,
     );
-    let add_btn = gfx::rect(x1 - 16.0 - 88.0, add_name.top, x1 - 16.0, add_name.bottom);
-    let custom_n = st.settings.custom.len() as f32;
-    let custom_card = gfx::rect(
-        x0,
-        y,
-        x1,
-        y + CARD_PAD
-            + 52.0
-            + if custom_n > 0.0 {
-                8.0 + custom_n * 46.0
-            } else {
-                0.0
-            }
-            + CARD_PAD,
-    );
+    let custom_n = custom as f32;
+    // The empty state needs one more line under the fields for the hint; the
+    // hint used to be drawn on top of the URL field.
+    let custom_body = if custom_n > 0.0 {
+        8.0 + custom_n * 46.0
+    } else {
+        34.0
+    };
+    let custom_card = gfx::rect(x0, y, x1, y + CARD_PAD + 52.0 + custom_body + CARD_PAD);
     let first = custom_card.top + CARD_PAD + 52.0 + 8.0;
-    let custom_rows: Vec<D2D_RECT_F> = (0..st.settings.custom.len())
+    let custom_rows: Vec<D2D_RECT_F> = (0..custom)
         .map(|i| {
             gfx::rect(
                 x0,
@@ -134,10 +145,10 @@ fn layout(st: &AppState) -> Layout {
         .iter()
         .map(|r| {
             gfx::rect(
-                r.right - 16.0 - 76.0,
-                r.top + 9.0,
-                r.right - 16.0,
-                r.top + 37.0,
+                r.right - INSET - 76.0,
+                r.top + 7.0,
+                r.right - INSET,
+                r.top + 7.0 + BTN_H,
             )
         })
         .collect();
@@ -153,10 +164,10 @@ fn layout(st: &AppState) -> Layout {
         dir_card.top + CARD_PAD + ROW,
     );
     let dir_reset = gfx::rect(
-        x1 - 16.0 - 96.0,
-        dir_row.top + 12.0,
-        x1 - 16.0,
-        dir_row.top + 12.0 + BTN_H,
+        x1 - INSET - 96.0,
+        dir_row.top + (ROW - BTN_H) * 0.5,
+        x1 - INSET,
+        dir_row.top + (ROW + BTN_H) * 0.5,
     );
     let dir_btn = gfx::rect(
         dir_reset.left - 8.0 - 88.0,
@@ -167,11 +178,13 @@ fn layout(st: &AppState) -> Layout {
     let conc_row = gfx::rect(x0, dir_row.bottom, x1, dir_row.bottom + ROW);
     let theme_row = gfx::rect(x0, conc_row.bottom, x1, conc_row.bottom + ROW);
     let chip_y = conc_row.top + (ROW - 30.0) * 0.5;
+    // One control column for every two-column row, including the chip rows.
+    let control_left = |base: &D2D_RECT_F| base.left + INSET + LABEL_W + COL_GAP;
     let chips = |base: &D2D_RECT_F| -> Vec<D2D_RECT_F> {
         (0..4)
             .map(|i| {
                 chip(
-                    base.left + 170.0 + i as f32 * 76.0,
+                    control_left(base) + i as f32 * 76.0,
                     chip_y.max(base.top + 12.0),
                     68.0,
                 )
@@ -179,15 +192,23 @@ fn layout(st: &AppState) -> Layout {
             .collect()
     };
     let conc_chips = chips(&conc_row);
-    let theme_chips = chips(&theme_row);
+    let mut chip_x = control_left(&theme_row);
+    let theme_chips: Vec<D2D_RECT_F> = THEME_W
+        .iter()
+        .map(|w| {
+            let r = chip(chip_x, chip_y.max(theme_row.top + 12.0), *w);
+            chip_x = r.right + 8.0;
+            r
+        })
+        .collect();
 
     let about_header_y = dir_card.bottom + SECTION_GAP;
     y = about_header_y + HEADER_H;
     let about_card = gfx::rect(x0, y, x1, y + 96.0);
     let about_get = gfx::rect(
-        about_card.right - 16.0 - 104.0,
+        about_card.right - INSET - 104.0,
         about_card.top + 32.0,
-        about_card.right - 16.0,
+        about_card.right - INSET,
         about_card.top + 32.0 + BTN_H,
     );
     let about_check = gfx::rect(
@@ -523,20 +544,26 @@ impl AppState {
             let name = BUILTIN[i].1;
             let on = enabled(self, name);
             if i > 0 {
-                self.gfx
-                    .line(row.left, row.top, row.right, row.top, p.border, 0.6);
+                self.gfx.line(
+                    row.left + INSET,
+                    row.top,
+                    row.right - INSET,
+                    row.top,
+                    p.border,
+                    0.6,
+                );
             }
             self.gfx.text(
                 BUILTIN[i].0,
-                gfx::rect(row.left + 20.0, row.top, row.right - 160.0, row.bottom),
+                gfx::rect(row.left + INSET, row.top, row.right - 160.0, row.bottom),
                 13,
                 true,
                 p.text,
             );
             let pill = gfx::rect(
-                row.right - 92.0,
+                row.right - INSET - 72.0,
                 row.top + (ROW - 28.0) * 0.5,
-                row.right - 20.0,
+                row.right - INSET,
                 row.top + (ROW + 28.0) * 0.5,
             );
             let hot = self.hover == Some((HIT_SET_TOGGLE, i));
@@ -555,8 +582,10 @@ impl AppState {
                 if on { "已启用" } else { "已停用" },
                 pill,
                 11,
-                false,
-                if on { p.on_accent } else { p.sub },
+                true,
+                // Off is still clickable, so it keeps body colour like the
+                // unselected chips; only the fill tells the two states apart.
+                if on { p.on_accent } else { p.text },
             );
         }
 
@@ -595,12 +624,12 @@ impl AppState {
             self.gfx.text(
                 "可选：填写返回联想目录格式 JSON 的地址，添加后与内置源一起聚合",
                 gfx::rect(
-                    l.custom_card.left + 16.0,
-                    l.custom_card.bottom - 26.0,
-                    l.custom_card.right - 16.0,
-                    l.custom_card.bottom - 6.0,
+                    l.custom_card.left + INSET,
+                    l.custom_card.bottom - 30.0,
+                    l.custom_card.right - INSET,
+                    l.custom_card.bottom - 8.0,
                 ),
-                10,
+                11,
                 false,
                 p.sub,
             );
@@ -609,9 +638,9 @@ impl AppState {
                 let c = &self.settings.custom[i];
                 if i > 0 {
                     self.gfx.line(
-                        row.left + 16.0,
+                        row.left + INSET,
                         row.top,
-                        row.right - 16.0,
+                        row.right - INSET,
                         row.top,
                         p.border,
                         0.6,
@@ -619,14 +648,25 @@ impl AppState {
                 }
                 self.gfx.text(
                     &c.name.clone(),
-                    gfx::rect(row.left + 16.0, row.top, row.left + 150.0, row.bottom),
-                    12,
+                    gfx::rect(
+                        row.left + INSET,
+                        row.top,
+                        row.left + INSET + 130.0,
+                        row.bottom,
+                    ),
+                    // Same 13 px bold as the built-in source rows above.
+                    13,
                     true,
                     p.text,
                 );
                 self.gfx.text(
                     &c.url.clone(),
-                    gfx::rect(row.left + 160.0, row.top, row.right - 110.0, row.bottom),
+                    gfx::rect(
+                        row.left + INSET + 140.0,
+                        row.top,
+                        l.custom_remove[i].left - 12.0,
+                        row.bottom,
+                    ),
                     11,
                     false,
                     p.sub,
@@ -662,9 +702,9 @@ impl AppState {
         self.gfx.text(
             "下载目录",
             gfx::rect(
-                dir_row.left + 20.0,
+                dir_row.left + INSET,
                 dir_row.top,
-                dir_row.left + 150.0,
+                dir_row.left + INSET + LABEL_W,
                 dir_row.bottom,
             ),
             12,
@@ -674,7 +714,7 @@ impl AppState {
         self.gfx.text(
             &self.settings.download_dir(),
             gfx::rect(
-                dir_row.left + 170.0,
+                dir_row.left + INSET + LABEL_W + COL_GAP,
                 dir_row.top,
                 l.dir_btn.left - 12.0,
                 dir_row.bottom,
@@ -714,9 +754,9 @@ impl AppState {
         self.gfx.text(
             "同时下载",
             gfx::rect(
-                conc_row.left + 20.0,
+                conc_row.left + INSET,
                 conc_row.top,
-                conc_row.left + 150.0,
+                conc_row.left + INSET + LABEL_W,
                 conc_row.bottom,
             ),
             12,
@@ -725,7 +765,9 @@ impl AppState {
         );
         let cur = self.settings.concurrency();
         for (i, r) in l.conc_chips.iter().enumerate() {
-            let v = CONCURRENCY[i];
+            let Some(v) = CONCURRENCY.get(i).copied() else {
+                break;
+            };
             let on = cur == v;
             let hot = self.hover == Some((HIT_SET_CONCURRENCY, v));
             self.gfx.round(
@@ -760,16 +802,18 @@ impl AppState {
         self.gfx.text(
             "主题",
             gfx::rect(
-                theme_row.left + 20.0,
+                theme_row.left + INSET,
                 theme_row.top,
-                theme_row.left + 150.0,
+                theme_row.left + INSET + LABEL_W,
                 theme_row.bottom,
             ),
             12,
             true,
             p.text,
         );
-        for (i, r) in l.theme_chips.iter().enumerate() {
+        // Exactly three chips, paired with their labels by the iterator so the
+        // slot count and the label array can never drift apart again.
+        for (i, (r, label)) in l.theme_chips.iter().zip(THEME_LABELS).enumerate() {
             let on = self.settings.theme
                 == match i {
                     1 => Theme::Light,
@@ -788,13 +832,8 @@ impl AppState {
                     p.subtle
                 },
             );
-            self.gfx.center_text(
-                ["跟随系统", "浅色", "深色"][i],
-                *r,
-                11,
-                on,
-                if on { p.on_accent } else { p.text },
-            );
+            self.gfx
+                .center_text(label, *r, 11, on, if on { p.on_accent } else { p.text });
         }
 
         // --- about / self-update ---------------------------------------------
@@ -808,11 +847,11 @@ impl AppState {
         self.gfx.round(l.about_card, 14.0, p.card);
         self.gfx.outline(l.about_card, p.border, 0.8);
         self.gfx.text(
-            &format!("AllStore  v{}", crate::selfupdate::current()),
+            &format!("AllStore v{}", crate::selfupdate::current()),
             gfx::rect(
-                l.about_card.left + 20.0,
+                l.about_card.left + INSET,
                 l.about_card.top + 14.0,
-                l.about_card.right - 220.0,
+                l.about_check.left - 16.0,
                 l.about_card.top + 40.0,
             ),
             13,
@@ -833,9 +872,10 @@ impl AppState {
         self.gfx.text(
             &note,
             gfx::rect(
-                l.about_card.left + 20.0,
+                l.about_card.left + INSET,
                 l.about_card.top + 44.0,
-                l.about_card.right - 20.0,
+                // Stop at the buttons instead of running underneath them.
+                l.about_check.left - 16.0,
                 l.about_card.top + 70.0,
             ),
             11,
@@ -880,19 +920,25 @@ impl AppState {
     }
 
     /// A rounded single-line input. The caret is drawn at the real text end so
-    /// the field looks focused, matching the search box.
+    /// the field looks focused, matching the search box. Same 13 px type as the
+    /// search box: it is the same editing primitive, so it must not shrink.
     fn draw_field(&mut self, r: D2D_RECT_F, hint: &str, text: &[u16], focused: bool) {
         let p = self.gfx.pal;
-        self.gfx.round(r, 9.0, p.subtle);
-        if focused {
-            self.gfx.outline(r, p.accent, 1.2);
-        }
+        // A card-coloured fill with a hairline border, like a WinUI TextBox.
+        // The old `subtle` fill put the placeholder at only ~3.7:1; on `card`
+        // it measures ~4.6:1 (light) and ~5.5:1 (dark).
+        self.gfx.round(r, 9.0, p.card);
+        self.gfx.outline(
+            r,
+            if focused { p.accent } else { p.border },
+            if focused { 1.2 } else { 0.8 },
+        );
         let s = String::from_utf16_lossy(text);
         if s.is_empty() && !focused {
             self.gfx.text(
                 hint,
                 gfx::rect(r.left + 12.0, r.top, r.right - 12.0, r.bottom),
-                11,
+                13,
                 false,
                 p.sub,
             );
@@ -901,15 +947,117 @@ impl AppState {
         self.gfx.text(
             &s,
             gfx::rect(r.left + 12.0, r.top, r.right - 20.0, r.bottom),
-            11,
+            13,
             false,
             p.text,
         );
         if focused && self.caret_on {
-            let w = self.gfx.measure_width(&s, 11, false);
+            let w = self.gfx.measure_width(&s, 13, false);
             let x = (r.left + 12.0 + w).min(r.right - 14.0);
             self.gfx
-                .line(x, r.top + 10.0, x, r.bottom - 10.0, p.accent, 1.2);
+                .line(x, r.top + 9.0, x, r.bottom - 9.0, p.accent, 1.2);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A typical maximised-ish window: wide enough that nothing is squeezed.
+    const W: f32 = 1240.0;
+
+    #[test]
+    fn every_card_shares_one_horizontal_inset() {
+        let l = layout_at(W, 0.0, 2);
+        assert_eq!(l.add_name.left - l.src_card.left, INSET);
+        assert_eq!(l.src_card.right - l.add_btn.right, INSET);
+        assert_eq!(l.src_card.right - l.dir_reset.right, INSET);
+        assert_eq!(l.src_card.right - l.custom_remove[0].right, INSET);
+        assert_eq!(l.src_card.right - l.about_get.right, INSET);
+    }
+
+    #[test]
+    fn theme_chips_match_their_labels() {
+        let l = layout_at(W, 0.0, 0);
+        // Four chips with three labels used to index out of bounds on paint.
+        assert_eq!(l.theme_chips.len(), THEME_LABELS.len());
+        for pair in l.theme_chips.windows(2) {
+            assert!(
+                pair[0].right < pair[1].left,
+                "theme chips overlap: {:?} {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        for r in l.theme_chips.iter().chain(l.conc_chips.iter()) {
+            assert!(r.right <= l.dir_card.right - INSET);
+        }
+    }
+
+    #[test]
+    fn empty_custom_card_keeps_the_hint_below_the_fields() {
+        let l = layout_at(W, 0.0, 0);
+        let hint_top = l.custom_card.bottom - 30.0;
+        assert!(
+            hint_top > l.add_url.bottom,
+            "hint top {hint_top} overlaps fields ending at {}",
+            l.add_url.bottom
+        );
+        assert!(l.custom_card.bottom - 8.0 > hint_top + 20.0);
+    }
+
+    #[test]
+    fn custom_rows_sit_between_the_fields_and_the_card_bottom() {
+        let l = layout_at(W, 0.0, 3);
+        assert!(l.custom_rows[0].top > l.add_url.bottom);
+        assert!(l.custom_rows.last().unwrap().bottom < l.custom_card.bottom);
+        assert_eq!(l.custom_rows.len(), l.custom_remove.len());
+        for pair in l.custom_rows.windows(2) {
+            assert_eq!(pair[0].bottom, pair[1].top);
+        }
+    }
+
+    #[test]
+    fn about_text_stops_before_the_buttons() {
+        let l = layout_at(W, 0.0, 0);
+        // The painter clips the title and the note at `about_check.left - 16`;
+        // the two buttons must stay to the right of that line.
+        assert!(l.about_check.left > l.about_card.left + 240.0);
+        assert!(l.about_check.right < l.about_get.left);
+        assert!(l.about_get.right <= l.about_card.right - INSET + 0.01);
+    }
+
+    #[test]
+    fn section_headers_stay_above_their_cards() {
+        let l = layout_at(W, 0.0, 1);
+        assert!(l.src_header_y + HEADER_H <= l.src_card.top + 0.01);
+        assert!(l.custom_header_y + HEADER_H <= l.custom_card.top + 0.01);
+        assert!(l.dir_header_y + HEADER_H <= l.dir_card.top + 0.01);
+        assert!(l.about_header_y + HEADER_H <= l.about_card.top + 0.01);
+    }
+
+    #[test]
+    fn chip_rows_start_in_the_directory_path_column() {
+        let l = layout_at(W, 0.0, 0);
+        // The painter puts the download path at `dir_row.left + INSET + LABEL_W
+        // + COL_GAP`; the chip rows must share that column, not sit 20 px left.
+        let column = l.dir_card.left + INSET + LABEL_W + COL_GAP;
+        assert_eq!(l.conc_chips[0].left, column);
+        assert_eq!(l.theme_chips[0].left, column);
+    }
+
+    #[test]
+    fn scrolling_moves_everything_by_the_same_amount() {
+        let a = layout_at(W, 0.0, 1);
+        let b = layout_at(W, 120.0, 1);
+        for (top, other) in [
+            (a.add_btn.top, b.add_btn.top),
+            (a.dir_card.top, b.dir_card.top),
+            (a.about_card.top, b.about_card.top),
+            (a.bottom, b.bottom),
+        ] {
+            assert!((top - other - 120.0).abs() < 0.01);
         }
     }
 }

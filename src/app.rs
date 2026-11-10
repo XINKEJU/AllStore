@@ -130,6 +130,11 @@ pub const HIT_SET_CONCURRENCY: u8 = 39;
 pub const HIT_SET_THEME: u8 = 40;
 pub const HIT_SET_SELF_CHECK: u8 = 41;
 pub const HIT_SET_SELF_GET: u8 = 42;
+// Utility entry points: download centre and update centre are header icons,
+// settings is a gear in the sidebar footer.
+pub const HIT_TOP_DL: u8 = 43;
+pub const HIT_TOP_UPDATES: u8 = 44;
+pub const HIT_SET_GEAR: u8 = 45;
 
 pub enum Payload {
     Data(Result<(String, Vec<ClassGroup>, Vec<App>), String>),
@@ -179,10 +184,7 @@ pub(crate) fn post(hwnd_usize: usize, msg: u32, p: Payload) {
 #[derive(Clone, PartialEq, Eq)]
 pub enum NavKind {
     Browse,
-    Updates,
-    Downloads,
     Library,
-    Settings,
 }
 
 #[derive(Clone)]
@@ -371,20 +373,6 @@ impl AppState {
                     group: 0,
                 },
                 NavItem {
-                    label: "软件更新".into(),
-                    code: String::new(),
-                    id: String::new(),
-                    kind: NavKind::Updates,
-                    group: 1,
-                },
-                NavItem {
-                    label: "下载管理".into(),
-                    code: String::new(),
-                    id: String::new(),
-                    kind: NavKind::Downloads,
-                    group: 1,
-                },
-                NavItem {
                     label: "我的软件".into(),
                     code: String::new(),
                     id: String::new(),
@@ -488,8 +476,13 @@ impl AppState {
     /// The input field is a real rectangle; the old hit-test treated the whole
     /// header strip as the field, so clicks near the title focused it.
     fn search_box_rect(&self) -> D2D_RECT_F {
-        let w = self.width as f32;
-        gfx::rect(252.0, 18.0, (w - 116.0).max(392.0), 54.0)
+        Self::search_box_rect_at(self.width as f32)
+    }
+
+    /// The search field ends 12 px left of the search button. The right side of
+    /// the header is now shared with the downloads / updates icons.
+    fn search_box_rect_at(w: f32) -> D2D_RECT_F {
+        gfx::rect(252.0, 18.0, (w - 216.0).max(392.0), 54.0)
     }
 
     fn blur_search(&mut self) {
@@ -905,10 +898,7 @@ impl AppState {
         self.nav.clear();
         for (label, code, id, kind, group) in [
             ("推荐", "soft", "-1", NavKind::Browse, 0u8),
-            ("软件更新", "", "", NavKind::Updates, 1u8),
-            ("下载管理", "", "", NavKind::Downloads, 1u8),
             ("我的软件", "", "", NavKind::Library, 1u8),
-            ("设置", "", "", NavKind::Settings, 1u8),
         ] {
             self.nav.push(NavItem {
                 label: label.into(),
@@ -980,30 +970,8 @@ impl AppState {
         self.mode = Mode::Browse;
         self.scroll = 0;
         match item.kind {
-            NavKind::Updates => {
-                self.mode = Mode::Updates;
-                self.show_updates();
-                return;
-            }
-            NavKind::Downloads => {
-                self.mode = Mode::Downloads;
-                self.status = format!(
-                    "下载管理  ·  {} 个任务  ·  {} 个进行中",
-                    self.downloads.len(),
-                    self.active_count()
-                );
-                self.invalidate();
-                return;
-            }
             NavKind::Library => {
                 self.show_library();
-                return;
-            }
-            NavKind::Settings => {
-                self.mode = Mode::Settings;
-                self.field = None;
-                self.status = "设置  ·  修改立即保存到本机".into();
-                self.invalidate();
                 return;
             }
             NavKind::Browse => {}
@@ -1044,6 +1012,37 @@ impl AppState {
             });
             post(h, WM_APP_LIST, Payload::List(r, epoch));
         });
+    }
+
+    /// Utility pages are opened from icons rather than navigation rows, so
+    /// they leave `active_nav` alone: pressing Esc returns to the category the
+    /// user was browsing instead of jumping back to the top.
+    pub(crate) fn open_updates(&mut self) {
+        self.focus_search = false;
+        self.mode = Mode::Updates;
+        self.scroll = 0;
+        self.show_updates();
+    }
+
+    pub(crate) fn open_downloads(&mut self) {
+        self.focus_search = false;
+        self.mode = Mode::Downloads;
+        self.scroll = 0;
+        self.status = format!(
+            "下载管理  ·  {} 个任务  ·  {} 个进行中",
+            self.downloads.len(),
+            self.active_count()
+        );
+        self.invalidate();
+    }
+
+    pub(crate) fn open_settings(&mut self) {
+        self.focus_search = false;
+        self.mode = Mode::Settings;
+        self.scroll = 0;
+        self.field = None;
+        self.status = "设置  ·  修改立即保存到本机".into();
+        self.invalidate();
     }
 
     pub(crate) fn do_search(&mut self) {
@@ -1298,7 +1297,28 @@ impl AppState {
     }
 
     fn search_button_rect(w: f32) -> D2D_RECT_F {
-        gfx::rect(w - 104.0, 18.0, w - PAD, 54.0)
+        gfx::rect(w - 204.0, 18.0, w - 124.0, 54.0)
+    }
+
+    /// Download centre icon: 40x40, vertically centred in the header.
+    fn top_dl_rect(w: f32) -> D2D_RECT_F {
+        gfx::rect(w - 112.0, 16.0, w - 72.0, 56.0)
+    }
+
+    /// Update centre icon, immediately right of the download icon.
+    fn top_updates_rect(w: f32) -> D2D_RECT_F {
+        gfx::rect(w - 64.0, 16.0, w - 24.0, 56.0)
+    }
+
+    /// Settings gear in the sidebar footer, right of the version label.
+    fn gear_rect(h: f32) -> D2D_RECT_F {
+        let footer_top = h - STATUS_H - 40.0;
+        gfx::rect(
+            NAV_W - 12.0 - 28.0,
+            footer_top + 6.0,
+            NAV_W - 12.0,
+            footer_top + 34.0,
+        )
     }
 
     fn detail_text_width(w: f32) -> f32 {
@@ -1626,6 +1646,46 @@ impl AppState {
             self.hover == Some((HIT_SEARCH_BTN, 0)),
             false,
         );
+
+        // Utility icons: downloads and updates used to occupy two rows of the
+        // navigation list. As header icons they stay one click away from every
+        // page, and their badges show progress at a glance.
+        let icons = [
+            (
+                Self::top_dl_rect(w),
+                '\u{E896}',
+                self.active_count(),
+                HIT_TOP_DL,
+                self.mode == Mode::Downloads,
+            ),
+            (
+                Self::top_updates_rect(w),
+                '\u{E895}',
+                self.updates.len(),
+                HIT_TOP_UPDATES,
+                self.mode == Mode::Updates,
+            ),
+        ];
+        for (r, glyph, count, hit, active) in icons {
+            if active {
+                self.gfx.round(r, 20.0, p.accent_soft);
+            } else if self.hover == Some((hit, 0)) {
+                self.gfx.round(r, 20.0, p.hover);
+            }
+            self.gfx
+                .icon(glyph, r, 17, if active { p.accent } else { p.text });
+            if count > 0 {
+                let label = if count > 99 {
+                    "99+".to_string()
+                } else {
+                    count.to_string()
+                };
+                let bw = if count > 99 { 26.0 } else { 18.0 };
+                let badge = gfx::rect(r.right + 2.0 - bw, r.top - 2.0, r.right + 2.0, r.top + 16.0);
+                self.gfx.round(badge, 9.0, p.accent);
+                self.gfx.center_text(&label, badge, 9, true, p.on_accent);
+            }
+        }
     }
 
     fn render_nav(&mut self, h: f32) {
@@ -1635,18 +1695,11 @@ impl AppState {
         self.gfx
             .fill(gfx::rect(NAV_W - 1.0, TOP_H, NAV_W, h - STATUS_H), p.border);
         let rects: Vec<D2D_RECT_F> = (0..self.nav.len()).map(|i| self.nav_rect(i)).collect();
-        let active_downloads = self.active_count();
         let labels: Vec<String> = self.nav.iter().map(|n| n.label.clone()).collect();
         let groups: Vec<u8> = self.nav.iter().map(|n| n.group).collect();
-        let badges: Vec<usize> = self
-            .nav
-            .iter()
-            .map(|n| match n.kind {
-                NavKind::Updates => self.updates.len(),
-                NavKind::Downloads => active_downloads,
-                NavKind::Browse | NavKind::Library | NavKind::Settings => 0,
-            })
-            .collect();
+        // Utility pages are not part of the list any more, so no row may stay
+        // highlighted while one of them is open.
+        let utility = matches!(self.mode, Mode::Updates | Mode::Downloads | Mode::Settings);
         // Reserve the footer band: without this the last category row was
         // drawn straight through the version label on short windows.
         let footer_top = h - STATUS_H - 40.0;
@@ -1666,7 +1719,7 @@ impl AppState {
                     p.sub,
                 );
             }
-            let active = i == self.active_nav;
+            let active = i == self.active_nav && !utility;
             let hovered = self.hover == Some((HIT_NAV, i));
             if active {
                 self.gfx.round(r, 8.0, p.accent_soft);
@@ -1680,34 +1733,40 @@ impl AppState {
                     p.accent,
                 );
             }
-            let badge_count = badges[i];
-            let label_right = if badge_count > 0 {
-                r.right - 40.0
-            } else {
-                r.right - 12.0
-            };
             self.gfx.text(
                 &labels[i],
-                gfx::rect(26.0, r.top, label_right, r.bottom),
+                gfx::rect(26.0, r.top, r.right - 12.0, r.bottom),
                 13,
                 active,
                 if active { p.accent } else { p.text },
             );
-            if badge_count > 0 {
-                let badge = gfx::rect(r.right - 34.0, r.top + 7.0, r.right - 8.0, r.top + 27.0);
-                self.gfx.round(badge, 10.0, p.accent);
-                self.gfx
-                    .center_text(&badge_count.to_string(), badge, 10, true, p.on_accent);
-            }
         }
         self.gfx.fill(
             gfx::rect(12.0, footer_top, NAV_W - 12.0, footer_top + 1.0),
             p.border,
         );
+        // Settings lives here as a gear: it is a utility, not a catalog section,
+        // so it no longer takes a full navigation row.
+        let gear = Self::gear_rect(h);
+        if self.mode == Mode::Settings {
+            self.gfx.round(gear, 8.0, p.accent_soft);
+        } else if self.hover == Some((HIT_SET_GEAR, 0)) {
+            self.gfx.round(gear, 8.0, p.hover);
+        }
+        self.gfx.icon(
+            '\u{E713}',
+            gear,
+            15,
+            if self.mode == Mode::Settings {
+                p.accent
+            } else {
+                p.text
+            },
+        );
         let version = format!("AllStore v{}", env!("CARGO_PKG_VERSION"));
         self.gfx.text(
             &version,
-            gfx::rect(20.0, footer_top + 4.0, NAV_W - 16.0, h - STATUS_H - 6.0),
+            gfx::rect(20.0, footer_top + 4.0, NAV_W - 46.0, h - STATUS_H - 6.0),
             10,
             false,
             p.sub,
@@ -2278,6 +2337,12 @@ impl AppState {
             if in_rect(x, y, Self::search_button_rect(w)) {
                 return Some((HIT_SEARCH_BTN, 0));
             }
+            if in_rect(x, y, Self::top_dl_rect(w)) {
+                return Some((HIT_TOP_DL, 0));
+            }
+            if in_rect(x, y, Self::top_updates_rect(w)) {
+                return Some((HIT_TOP_UPDATES, 0));
+            }
             return None;
         }
         if y > h - STATUS_H {
@@ -2287,6 +2352,9 @@ impl AppState {
             return None;
         }
         if x < NAV_W {
+            if in_rect(x, y, Self::gear_rect(h)) {
+                return Some((HIT_SET_GEAR, 0));
+            }
             for i in 0..self.nav.len() {
                 if in_rect(x, y, self.nav_rect(i)) {
                     return Some((HIT_NAV, i));
@@ -2365,7 +2433,7 @@ impl AppState {
                     self.invalidate();
                     return;
                 }
-                Some((kind, i)) if kind >= HIT_SET_TOGGLE => {
+                Some((kind, i)) if (HIT_SET_TOGGLE..=HIT_SET_SELF_GET).contains(&kind) => {
                     self.focus_search = false;
                     self.blur_search();
                     self.field = None;
@@ -2416,20 +2484,9 @@ impl AppState {
             }
             Some((HIT_INSTALL, i)) => self.start_download(i, false),
             Some((HIT_CARD, i)) => self.open_detail(i),
-            Some((HIT_DL_NAV, _)) => {
-                if let Some(i) = self.nav.iter().position(|n| n.kind == NavKind::Downloads) {
-                    self.active_nav = i;
-                }
-                self.mode = Mode::Downloads;
-                self.scroll = 0;
-                self.focus_search = false;
-                self.status = format!(
-                    "下载管理  ·  {} 个任务  ·  {} 个进行中",
-                    self.downloads.len(),
-                    self.active_count()
-                );
-                self.invalidate();
-            }
+            Some((HIT_DL_NAV, _)) | Some((HIT_TOP_DL, _)) => self.open_downloads(),
+            Some((HIT_TOP_UPDATES, _)) => self.open_updates(),
+            Some((HIT_SET_GEAR, _)) => self.open_settings(),
             Some((kind, i))
                 if (HIT_DL_CANCEL..=HIT_DL_CLEAR).contains(&kind)
                     || matches!(kind, HIT_DL_INSTALL | HIT_DL_PAUSE) =>
@@ -3005,13 +3062,32 @@ mod tests {
     }
 
     #[test]
-    fn header_search_and_button_do_not_overlap() {
-        let w = 1100.0f32;
-        let box_r = (w - 116.0).max(392.0);
-        let search = gfx::rect(252.0, 18.0, box_r, 54.0);
-        let button = AppState::search_button_rect(w);
-        assert!(!overlaps(search, button));
-        assert!(button.right <= w - 16.0);
+    fn header_search_and_utilities_do_not_overlap() {
+        for w in [1000.0f32, 1100.0, 1600.0] {
+            let search = AppState::search_box_rect_at(w);
+            let button = AppState::search_button_rect(w);
+            let dl = AppState::top_dl_rect(w);
+            let up = AppState::top_updates_rect(w);
+            assert!(!overlaps(search, button), "w={w}: field overlaps search");
+            assert!(!overlaps(button, dl), "w={w}: search overlaps downloads");
+            assert!(!overlaps(dl, up), "w={w}: downloads overlap updates");
+            assert!(up.right <= w - 16.0, "w={w}: updates icon leaves header");
+            assert!(up.bottom <= TOP_H && dl.top >= 0.0);
+        }
+    }
+
+    #[test]
+    fn settings_gear_sits_inside_the_sidebar_footer() {
+        for h in [620.0f32, 800.0, 1200.0] {
+            let g = AppState::gear_rect(h);
+            let footer_top = h - STATUS_H - 40.0;
+            assert!(g.left >= 12.0 && g.right <= NAV_W - 12.0, "h={h}");
+            assert!(g.top >= footer_top, "h={h}: gear leaves the footer band");
+            assert!(
+                g.bottom <= h - STATUS_H,
+                "h={h}: gear reaches the status bar"
+            );
+        }
     }
 
     #[test]
@@ -3172,7 +3248,7 @@ mod tests {
         for w in [1000.0f32, 1100.0, 2048.0] {
             // The renderer derives the rect from self.width; the geometry is
             // the same formula, so assert the token relationship directly.
-            let r = gfx::rect(252.0, 18.0, (w - 116.0).max(392.0), 54.0);
+            let r = AppState::search_box_rect_at(w);
             assert!(r.right > r.left + 100.0);
             assert!(r.top >= 0.0 && r.bottom <= TOP_H);
             let title = gfx::rect(66.0, 12.0, 240.0, 62.0);

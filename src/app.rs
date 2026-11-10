@@ -82,6 +82,7 @@ pub const HIT_IGNORED_LIST: u8 = 18;
 pub const HIT_IGNORED_RESTORE: u8 = 19;
 pub const HIT_IGNORED_ALL: u8 = 20;
 pub const HIT_REINSTALL: u8 = 21;
+pub const HIT_DL_INSTALL: u8 = 22;
 
 pub enum Payload {
     Data(Result<(String, Vec<ClassGroup>, Vec<App>), String>),
@@ -700,19 +701,16 @@ impl AppState {
         let Some(app) = self.apps.get(idx).cloned() else {
             return;
         };
-        let existing = self
-            .task_for(&app.name)
-            .map(|t| (t.id, t.state, t.path.clone()));
-        if let Some((id, state, path)) = existing {
+        let existing = self.task_for(&app.name).map(|t| (t.id, t.state));
+        if let Some((id, state)) = existing {
             match state {
                 DlState::Downloading | DlState::Queued => self.cancel_task(id),
                 DlState::Failed | DlState::Canceled => self.retry_task(id),
                 DlState::Done => {
-                    if let Some(p) = path {
-                        downloads::open_folder(&p);
-                        self.status = "已在资源管理器中选中安装包".into();
-                        self.invalidate();
-                    }
+                    // A finished primary action installs the package. The
+                    // install path is verified by install_task; users who want
+                    // just the file can use "打开位置" in the download centre.
+                    self.install_task(id);
                 }
             }
             return;
@@ -1463,7 +1461,7 @@ impl AppState {
                 let text = match state {
                     DlState::Downloading => format!("{}  ·  下载中", pct),
                     DlState::Queued => "等待下载…".into(),
-                    DlState::Done => "已下载到 Downloads".into(),
+                    DlState::Done => "已下载  ·  点击安装".into(),
                     DlState::Failed => "下载失败，可重试".into(),
                     DlState::Canceled => "已取消，可重试".into(),
                 };
@@ -1513,7 +1511,7 @@ impl AppState {
                 .flatten();
             let label = match task.map(|t| t.0) {
                 Some(DlState::Downloading | DlState::Queued) => "取消",
-                Some(DlState::Done) => "打开",
+                Some(DlState::Done) => "安装",
                 Some(DlState::Failed | DlState::Canceled) => "重试",
                 None => match local {
                     Some(info) if info.outdated => "更新",
@@ -1662,8 +1660,13 @@ impl AppState {
 
         let hint = Self::detail_progress_text_rect(w);
         if let Some((state, _frac, pct)) = &task {
+            let caption = if *state == DlState::Done {
+                "已下载  ·  点击「安装」运行安装包".to_string()
+            } else {
+                format!("{}  ·  进度已同步到下载管理", pct)
+            };
             self.gfx.text(
-                &format!("{}  ·  进度已同步到下载管理", pct),
+                &caption,
                 hint,
                 11,
                 false,
@@ -1697,7 +1700,7 @@ impl AppState {
         }
         let label = match task.as_ref().map(|t| t.0) {
             Some(DlState::Downloading | DlState::Queued) => "取消",
-            Some(DlState::Done) => "打开位置",
+            Some(DlState::Done) => "安装",
             Some(DlState::Failed | DlState::Canceled) => "重试",
             None => match &local {
                 Some(info) if info.outdated => "获取新版",
@@ -1926,7 +1929,9 @@ impl AppState {
                 );
                 self.invalidate();
             }
-            Some((kind, i)) if (HIT_DL_CANCEL..=HIT_DL_CLEAR).contains(&kind) => {
+            Some((kind, i))
+                if (HIT_DL_CANCEL..=HIT_DL_CLEAR).contains(&kind) || kind == HIT_DL_INSTALL =>
+            {
                 downloads::apply(self, kind, i);
             }
             Some((kind, i))
@@ -2416,18 +2421,19 @@ mod tests {
     #[test]
     fn download_row_percentage_has_a_real_rectangle() {
         let r = gfx::rect(NAV_W + PAD, TOP_H + 110.0, 1600.0 - PAD, TOP_H + 210.0);
-        let text_right = r.right - 200.0;
+        let text_right = r.right - 276.0;
         let pct = gfx::rect(
             text_right + 10.0,
             r.top + 64.0,
-            r.right - 16.0,
+            text_right + 64.0,
             r.top + 88.0,
         );
         assert!(pct.right > pct.left, "percentage rect is inverted");
         assert!(pct.right - pct.left >= 40.0);
-        let (primary, secondary) = AppState::dl_buttons(r);
+        let (primary, secondary, tertiary) = AppState::dl_buttons(r);
         assert!(!overlaps(pct, primary));
         assert!(!overlaps(pct, secondary));
+        assert!(!overlaps(pct, tertiary));
     }
 
     #[test]

@@ -6,10 +6,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
+use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::app::{
-    AppState, GAP, HIT_DL_CANCEL, HIT_DL_CLEAR, HIT_DL_OPEN, HIT_DL_REMOVE, HIT_DL_RETRY, NAV_W,
-    PAD, Payload, STATUS_H, TOP_H, WM_APP_DL_DONE, WM_APP_DL_PROGRESS, draw_button, in_rect, post,
+    AppState, GAP, HIT_DL_CANCEL, HIT_DL_CLEAR, HIT_DL_INSTALL, HIT_DL_OPEN, HIT_DL_REMOVE,
+    HIT_DL_RETRY, NAV_W, PAD, Payload, STATUS_H, TOP_H, WM_APP_DL_DONE, WM_APP_DL_PROGRESS,
+    draw_button, in_rect, post,
 };
 use crate::gfx::{self, Color, Gfx, Palette};
 use crate::updates_ui;
@@ -259,13 +263,92 @@ impl Progress {
 }
 
 pub fn open_folder(path: &str) {
-    // Selects the file in Explorer; never executes the installer itself.
+    // Selects the file in Explorer without executing it — the low-risk
+    // secondary action for users who want the installer file itself.
     let _ = std::process::Command::new("explorer.exe")
         .arg(format!("/select,{}", path))
         .spawn();
 }
 
+/// Launch a downloaded package through the shell. `ShellExecuteW("open")`
+/// respects the file association and, unlike `CreateProcess`, honours the
+/// installer's manifest: a package that requests elevation triggers the normal
+/// UAC prompt, `.msi` goes through msiexec, and archives open in Explorer.
+///
+/// Returns `Ok(())` when the shell accepted the request (the installer has been
+/// *started*, not silently installed), or a human-readable error. Only paths
+/// produced by our own verified downloader reach this function.
+pub fn run_installer(path: &str) -> Result<(), String> {
+    if path.is_empty() || !std::path::Path::new(path).is_file() {
+        return Err("安装包文件不存在，可能已被移动或删除".into());
+    }
+    let file = HSTRING::from(path);
+    let exe = w!("open");
+    // ShellExecuteW returns an HINSTANCE whose numeric value > 32 means
+    // success; values <= 32 are Win32 error codes (it does not use HRESULT).
+    let ret = unsafe {
+        ShellExecuteW(
+            None,
+            exe,
+            &file,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    let code = ret.0 as isize;
+    if code > 32 {
+        Ok(())
+    } else {
+        Err(shell_error(code))
+    }
+}
+
+/// Translate the small integer error codes documented for ShellExecute into a
+/// message an end user can act on. Unknown codes keep the raw number so a
+/// support report is still useful.
+fn shell_error(code: isize) -> String {
+    match code {
+        0 => "系统内存不足，无法启动安装程序".into(),
+        2 => "找不到安装包文件".into(),
+        3 => "安装包的路径无效".into(),
+        5 => "系统拒绝访问该安装包".into(),
+        8 => "系统资源不足，无法启动安装程序".into(),
+        11 => "安装包格式无效，不是可执行的程序".into(),
+        26 => "安装包正被其他程序占用，请稍后重试".into(),
+        27 => "缺少文件关联，无法打开该安装包".into(),
+        31 => "没有关联的程序可以打开该安装包".into(),
+        _ => format!("系统未能启动安装程序（错误码 {}）", code),
+    }
+}
+
 impl AppState {
+    /// Start the installer for a finished download. Only a `Done` task with a
+    /// verified path can reach here, so we never launch a half-written `.part`.
+    /// The install itself runs in a separate process; a successful return means
+    /// it was *started*, and the normal UAC prompt may still be pending.
+    pub fn install_task(&mut self, id: u64) {
+        let Some(t) = self.downloads.iter().find(|t| t.id == id) else {
+            return;
+        };
+        if t.state != DlState::Done {
+            return;
+        }
+        let (name, path) = (t.name.clone(), t.path.clone());
+        let result = path
+            .as_deref()
+            .map(run_installer)
+            .unwrap_or_else(|| Err("安装包路径已丢失".into()));
+        self.status = match result {
+            Ok(()) => format!(
+                "已启动 {} 的安装程序  ·  请按系统提示完成安装，完成后列表会自动刷新",
+                name
+            ),
+            Err(e) => format!("无法启动 {} 的安装程序：{}", name, e),
+        };
+        self.invalidate();
+    }
+
     /// Reuse a live task instead of downloading the same app twice.
     pub fn new_download(&mut self, name: &str, url: &str, logo: Option<String>) -> u64 {
         if let Some(t) =
@@ -473,7 +556,9 @@ impl AppState {
         let h = self.height as f32;
         let x0 = NAV_W + PAD;
         let x1 = w - PAD;
-        if x1 <= x0 + 320.0 {
+        // Three 80px actions + the icon/text band need ~450 px. MIN_W guarantees
+        // 752, but keep the guard honest so no band can go negative.
+        if x1 <= x0 + 460.0 {
             return None;
         }
         let top = DL_ROWS_TOP + i as f32 * (DL_ROW_H + GAP) - self.scroll as f32;
@@ -483,10 +568,14 @@ impl AppState {
         Some(gfx::rect(x0, top, x1, top + DL_ROW_H))
     }
 
-    pub fn dl_buttons(r: D2D_RECT_F) -> (D2D_RECT_F, D2D_RECT_F) {
+    /// Three right-aligned slots: primary (安装/取消/重试), secondary
+    /// (打开位置/移除) and tertiary (移除). Kept disjoint at every width so a
+    /// finished row can offer "安装" and "打开位置" at the same time.
+    pub fn dl_buttons(r: D2D_RECT_F) -> (D2D_RECT_F, D2D_RECT_F, D2D_RECT_F) {
         (
-            gfx::rect(r.right - 100.0, r.top + 32.0, r.right - 16.0, r.top + 64.0),
-            gfx::rect(r.right - 186.0, r.top + 32.0, r.right - 108.0, r.top + 64.0),
+            gfx::rect(r.right - 96.0, r.top + 32.0, r.right - 16.0, r.top + 64.0),
+            gfx::rect(r.right - 180.0, r.top + 32.0, r.right - 104.0, r.top + 64.0),
+            gfx::rect(r.right - 264.0, r.top + 32.0, r.right - 188.0, r.top + 64.0),
         )
     }
 
@@ -772,7 +861,7 @@ impl AppState {
             )
         } else {
             format!(
-                "共 {} 个任务  ·  已下载的安装包保存在 Downloads，需手动运行安装",
+                "共 {} 个任务  ·  完成后点「安装」运行安装包，或「打开位置」查看文件",
                 self.downloads.len()
             )
         };
@@ -840,7 +929,9 @@ impl AppState {
             }
 
             let tx = r.left + 88.0;
-            let text_right = r.right - 200.0;
+            // Three button slots occupy the right 264 px; keep every text and
+            // progress band strictly to their left (0.4.0 negative-width bug).
+            let text_right = r.right - 276.0;
             self.gfx.text(
                 &t.name,
                 gfx::rect(tx, r.top + 14.0, text_right, r.top + 38.0),
@@ -898,7 +989,7 @@ impl AppState {
                 gfx::rect(
                     text_right + 10.0,
                     r.top + 64.0,
-                    r.right - 16.0,
+                    text_right + 64.0,
                     r.top + 88.0,
                 ),
                 12,
@@ -906,7 +997,7 @@ impl AppState {
                 bar_color,
             );
 
-            let (primary, secondary) = Self::dl_buttons(r);
+            let (primary, secondary, tertiary) = Self::dl_buttons(r);
             match t.state {
                 DlState::Downloading | DlState::Queued => {
                     draw_button(
@@ -924,15 +1015,24 @@ impl AppState {
                         &mut self.gfx,
                         p,
                         primary,
-                        "打开位置",
+                        "安装",
                         true,
-                        self.hover == Some((HIT_DL_OPEN, i)),
+                        self.hover == Some((HIT_DL_INSTALL, i)),
                         false,
                     );
                     draw_button(
                         &mut self.gfx,
                         p,
                         secondary,
+                        "打开位置",
+                        false,
+                        self.hover == Some((HIT_DL_OPEN, i)),
+                        false,
+                    );
+                    draw_button(
+                        &mut self.gfx,
+                        p,
+                        tertiary,
                         "移除",
                         false,
                         self.hover == Some((HIT_DL_REMOVE, i)),
@@ -952,7 +1052,7 @@ impl AppState {
                     draw_button(
                         &mut self.gfx,
                         p,
-                        secondary,
+                        tertiary,
                         "移除",
                         false,
                         self.hover == Some((HIT_DL_REMOVE, i)),
@@ -1007,7 +1107,7 @@ impl AppState {
 fn is_dl_hit(k: u8) -> bool {
     matches!(
         k,
-        HIT_DL_CANCEL | HIT_DL_RETRY | HIT_DL_OPEN | HIT_DL_REMOVE
+        HIT_DL_CANCEL | HIT_DL_RETRY | HIT_DL_INSTALL | HIT_DL_OPEN | HIT_DL_REMOVE
     )
 }
 
@@ -1019,17 +1119,22 @@ pub(crate) fn hit_targets(st: &AppState, x: f32, y: f32) -> Option<(u8, usize)> 
         let Some(r) = st.dl_row_rect(i) else {
             continue;
         };
-        let (primary, secondary) = AppState::dl_buttons(r);
+        let (primary, secondary, tertiary) = AppState::dl_buttons(r);
         let t = &st.downloads[i];
         if in_rect(x, y, primary) {
             let kind = match t.state {
                 DlState::Downloading | DlState::Queued => HIT_DL_CANCEL,
-                DlState::Done => HIT_DL_OPEN,
+                DlState::Done => HIT_DL_INSTALL,
                 _ => HIT_DL_RETRY,
             };
             return Some((kind, i));
         }
-        if in_rect(x, y, secondary)
+        // "打开位置" only exists on a finished row; "移除" lives in the
+        // leftmost slot so it stays put across Done and Failed states.
+        if in_rect(x, y, secondary) && t.state == DlState::Done {
+            return Some((HIT_DL_OPEN, i));
+        }
+        if in_rect(x, y, tertiary)
             && matches!(t.state, DlState::Done | DlState::Failed | DlState::Canceled)
         {
             return Some((HIT_DL_REMOVE, i));
@@ -1047,6 +1152,7 @@ pub(crate) fn apply(st: &mut AppState, kind: u8, i: usize) {
         HIT_DL_CANCEL => st.cancel_task(id),
         HIT_DL_RETRY => st.retry_task(id),
         HIT_DL_REMOVE => st.remove_task(id),
+        HIT_DL_INSTALL => st.install_task(id),
         HIT_DL_OPEN => {
             if let Some(p) = path {
                 open_folder(&p);
@@ -1172,5 +1278,51 @@ mod tests {
         // Written bytes are tracked separately so a slow disk can lag.
         assert_eq!(p.written, p.done);
         assert!(p.disk_speed >= 0.0);
+    }
+
+    /// A finished row must fit three disjoint actions (安装 / 打开位置 /
+    /// 移除) and the progress percentage, with real (positive) widths.
+    #[test]
+    fn download_row_has_three_disjoint_actions_at_every_width() {
+        for w in [1000.0f32, 1100.0, 1600.0, 2560.0] {
+            let r = gfx::rect(NAV_W + PAD, 0.0, w - PAD, DL_ROW_H);
+            let (primary, secondary, tertiary) = AppState::dl_buttons(r);
+            assert!(
+                secondary.right < primary.left,
+                "w={w}: 打开位置 crosses 安装"
+            );
+            assert!(
+                tertiary.right < secondary.left,
+                "w={w}: 移除 crosses 打开位置"
+            );
+            for b in [primary, secondary, tertiary] {
+                assert!(b.right - b.left >= 56.0, "w={w}: action button too narrow");
+                assert!(b.right <= r.right - 16.0);
+            }
+            // Text and progress stop 12px before the leftmost button.
+            let text_right = r.right - 276.0;
+            assert!(text_right < tertiary.left, "w={w}: text crosses actions");
+            assert!(
+                text_right > r.left + 88.0 + 100.0,
+                "w={w}: text band too narrow"
+            );
+            let pct = gfx::rect(text_right + 10.0, 0.0, text_right + 64.0, 24.0);
+            assert!(pct.right > pct.left, "w={w}: percentage rect inverted");
+        }
+    }
+
+    #[test]
+    fn missing_installer_path_is_reported_not_launched() {
+        // A path that cannot exist must fail before any shell call.
+        let err = run_installer("C:\\__mindosshop_no_such_installer__.exe").unwrap_err();
+        assert!(err.contains("不存在"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn shell_error_codes_are_actionable() {
+        assert!(shell_error(2).contains("找不到"));
+        assert!(shell_error(5).contains("拒绝"));
+        assert!(shell_error(11).contains("格式"));
+        assert!(shell_error(99).contains("99"));
     }
 }

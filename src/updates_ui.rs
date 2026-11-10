@@ -16,7 +16,7 @@ use crate::app::{
     STATUS_H, TOP_H, WM_APP_DL_DONE, WM_APP_DL_PROGRESS, WM_APP_STATUS, WM_APP_UPDATE_DONE,
     WM_APP_UPDATE_PROGRESS, draw_button, in_rect, post,
 };
-use crate::downloads::Progress;
+use crate::downloads::{DlState, Progress};
 use crate::gfx;
 use crate::installed::{self, Installed, Inventory};
 use crate::net;
@@ -751,6 +751,15 @@ impl AppState {
                     false,
                 );
             } else {
+                // Reflect the shared task state (same task list as the cards
+                // and download centre) so a finished update offers "安装".
+                let task_state = self.task_for(&u.name).map(|t| t.state);
+                let (action, prominent) = match task_state {
+                    Some(DlState::Downloading | DlState::Queued) => ("取消", false),
+                    Some(DlState::Done) => ("安装", true),
+                    Some(DlState::Failed | DlState::Canceled) => ("重试", true),
+                    None => ("更新", true),
+                };
                 draw_button(
                     &mut self.gfx,
                     p,
@@ -764,8 +773,8 @@ impl AppState {
                     &mut self.gfx,
                     p,
                     upd,
-                    "更新",
-                    true,
+                    action,
+                    prominent,
                     self.hover == Some((HIT_ROW_UPDATE, i)),
                     false,
                 );
@@ -779,6 +788,22 @@ impl AppState {
         };
         let id = self.new_download(&u.name, &u.url, u.logo.clone());
         self.start_task(id);
+    }
+
+    /// The update row's primary button mirrors the store card: it cancels an
+    /// active job, retries a failed one, installs a finished package, or starts
+    /// a fresh download when nothing is pending for this app yet.
+    fn row_primary_action(&mut self, i: usize) {
+        let Some(u) = self.updates.get(i).cloned() else {
+            return;
+        };
+        let existing = self.task_for(&u.name).map(|t| (t.id, t.state));
+        match existing {
+            Some((id, DlState::Downloading | DlState::Queued)) => self.cancel_task(id),
+            Some((id, DlState::Failed | DlState::Canceled)) => self.retry_task(id),
+            Some((id, DlState::Done)) => self.install_task(id),
+            None => self.start_update_download(i),
+        }
     }
 
     fn update_all(&mut self) {
@@ -933,7 +958,7 @@ pub(crate) fn apply(st: &mut AppState, kind: u8, i: usize) {
         HIT_IGNORED_LIST => st.toggle_ignored_view(),
         HIT_IGNORED_ALL => st.restore_all(),
         HIT_IGNORED_RESTORE => st.restore_ignored(i),
-        HIT_ROW_UPDATE => st.start_update_download(i),
+        HIT_ROW_UPDATE => st.row_primary_action(i),
         HIT_ROW_IGNORE => st.ignore_update(i),
         HIT_ROW => {
             if let Some(u) = st.updates.get(i) {

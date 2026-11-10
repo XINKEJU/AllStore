@@ -63,7 +63,7 @@ $reg = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MindosShop"
 New-Item -Path $reg -Force | Out-Null
 # The bundle ships a VERSION file so the display version never drifts from
 # the built exe. Source checkouts fall back to Cargo.toml.
-$version = "0.7.0"
+$version = "0.8.0"
 $verFile = Join-Path $PSScriptRoot "VERSION"
 if (Test-Path -LiteralPath $verFile) {
     $v = (Get-Content -LiteralPath $verFile -Raw).Trim()

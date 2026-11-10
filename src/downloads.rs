@@ -11,14 +11,19 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::app::{
-    AppState, GAP, HIT_DL_CANCEL, HIT_DL_CLEAR, HIT_DL_INSTALL, HIT_DL_OPEN, HIT_DL_REMOVE,
-    HIT_DL_RETRY, NAV_W, PAD, Payload, STATUS_H, TOP_H, WM_APP_DL_DONE, WM_APP_DL_PROGRESS,
-    draw_button, in_rect, post,
+    AppState, GAP, HIT_DL_CANCEL, HIT_DL_CLEAR, HIT_DL_INSTALL, HIT_DL_OPEN, HIT_DL_PAUSE,
+    HIT_DL_REMOVE, HIT_DL_RETRY, NAV_W, PAD, Payload, STATUS_H, TOP_H, WM_APP_DL_DONE,
+    WM_APP_DL_PROGRESS, draw_button, in_rect, post,
 };
 use crate::gfx::{self, Color, Gfx, Palette};
 use crate::updates_ui;
 
 pub(crate) const DL_ROW_H: f32 = 100.0;
+/// How many transfers may hold a slot at once. Three keeps a fast line busy
+/// without opening a dozen sockets for a batch of updates.
+pub(crate) const MAX_CONCURRENT: usize = 3;
+/// Automatic retries per task after a transport failure (2 s, 4 s backoff).
+const MAX_RETRIES: u32 = 2;
 /// One sample every 500 ms -> a 36 second rolling window.
 pub(crate) const SPEED_SAMPLES: usize = 72;
 pub(crate) const DL_CHART_TOP: f32 = TOP_H + 96.0;
@@ -36,6 +41,9 @@ pub struct SpeedSample {
 pub enum DlState {
     Queued,
     Downloading,
+    /// Manually paused or restored from disk after a restart. Resuming keeps
+    /// the bytes already written to the `.part` file (HTTP Range).
+    Paused,
     Done,
     Failed,
     Canceled,
@@ -63,6 +71,7 @@ impl DlTask {
         match self.state {
             DlState::Done => 1.0,
             DlState::Downloading | DlState::Queued if self.total == 0 => 0.10,
+            DlState::Paused if self.total == 0 => 0.0,
             _ if self.total == 0 => 0.0,
             _ => (self.done as f64 / self.total as f64).clamp(0.0, 1.0) as f32,
         }
@@ -187,6 +196,16 @@ impl Progress {
     pub fn set_total(&mut self, total: u64) {
         self.total = total;
         self.emit(true);
+    }
+
+    /// Seed the counter with already-persisted bytes so a resumed download
+    /// starts its bar at the correct percentage instead of jumping from 0.
+    pub fn set_done(&mut self, done: u64) {
+        self.done = done;
+        self.written = done;
+        self.last_done = done;
+        self.last_written = done;
+        self.last_pct = -1;
     }
 
     pub fn total(&self) -> u64 {
@@ -349,13 +368,17 @@ impl AppState {
         self.invalidate();
     }
 
-    /// Reuse a live task instead of downloading the same app twice.
+    /// Reuse an existing task instead of downloading the same app twice.
+    /// A Paused task is reused too, so re-clicking "获取" on a half-downloaded
+    /// app resumes it instead of creating a duplicate.
     pub fn new_download(&mut self, name: &str, url: &str, logo: Option<String>) -> u64 {
-        if let Some(t) =
-            self.downloads.iter().rev().find(|t| {
-                t.name == name && matches!(t.state, DlState::Queued | DlState::Downloading)
-            })
-        {
+        if let Some(t) = self.downloads.iter().rev().find(|t| {
+            t.name == name
+                && matches!(
+                    t.state,
+                    DlState::Queued | DlState::Downloading | DlState::Paused
+                )
+        }) {
             return t.id;
         }
         self.next_dl_id += 1;
@@ -377,44 +400,234 @@ impl AppState {
         id
     }
 
-    /// Queue a batch before one worker drains it serially (used by
-    /// "update all"). Jobs stay "waiting" until their turn actually starts.
-    pub fn mark_running(&mut self, ids: &[u64]) {
-        for id in ids {
-            if let Some(t) = self.downloads.iter_mut().find(|t| t.id == *id) {
-                t.state = DlState::Queued;
-                t.done = 0;
-                t.total = 0;
-                t.speed = 0.0;
-                t.disk_speed = 0.0;
-                t.error = None;
-                t.cancel.store(false, Ordering::Relaxed);
-            }
-        }
-    }
-
+    /// Queue a task and let the pump decide when it actually runs. Keeping
+    /// the concurrency cap here (instead of "one thread per click") is what
+    /// stops a batch of twenty clicks from saturating the line.
     pub fn start_task(&mut self, id: u64) {
         let Some(t) = self.downloads.iter_mut().find(|t| t.id == id) else {
             return;
         };
-        if matches!(t.state, DlState::Downloading | DlState::Queued) && t.done > 0 {
+        // Already running or waiting: ignore. A Paused task (manually paused
+        // or restored from disk) is allowed through so it can continue from
+        // its partial bytes.
+        if matches!(t.state, DlState::Downloading | DlState::Queued) {
             return;
         }
+        let resume_from = updates_ui::partial_bytes(&t.name, &t.url);
+        t.state = DlState::Queued;
+        t.done = resume_from;
+        // Keep the known total across a resume so the bar doesn't collapse;
+        // a fresh download probes it from the first response header.
+        if resume_from == 0 {
+            t.total = 0;
+        }
+        t.speed = 0.0;
+        t.disk_speed = 0.0;
+        t.error = None;
+        t.cancel.store(false, Ordering::Relaxed);
+        self.save_downloads();
+        self.pump();
+    }
+
+    /// Transfers currently holding a download slot (queued tasks do not).
+    pub fn running_count(&self) -> usize {
+        self.downloads
+            .iter()
+            .filter(|t| t.state == DlState::Downloading)
+            .count()
+    }
+
+    /// Start queued tasks while there is a free slot. Called after queueing,
+    /// after a task finishes and after a pause frees its slot.
+    pub(crate) fn pump(&mut self) {
+        while self.running_count() < MAX_CONCURRENT {
+            let Some(id) = self
+                .downloads
+                .iter()
+                .find(|t| t.state == DlState::Queued)
+                .map(|t| t.id)
+            else {
+                break;
+            };
+            self.spawn_task(id);
+        }
+        // Recompute the status line only when something is actually waiting.
+        let waiting = self
+            .downloads
+            .iter()
+            .filter(|t| t.state == DlState::Queued)
+            .count();
+        if waiting > 0 {
+            self.status = format!("{} 个下载正在排队，完成后自动开始", waiting);
+            self.invalidate();
+        }
+    }
+
+    fn spawn_task(&mut self, id: u64) {
+        let Some(t) = self.downloads.iter_mut().find(|t| t.id == id) else {
+            return;
+        };
+        let resume_from = updates_ui::partial_bytes(&t.name, &t.url);
         t.state = DlState::Downloading;
-        t.done = 0;
-        t.total = 0;
+        t.done = resume_from;
         t.speed = 0.0;
         t.disk_speed = 0.0;
         t.error = None;
         t.cancel.store(false, Ordering::Relaxed);
         let (name, url, cancel) = (t.name.clone(), t.url.clone(), t.cancel.clone());
         let h = self.hwnd_usize();
-        self.status = format!("开始下载 {} …", name);
+        self.status = if resume_from > 0 {
+            format!("继续下载 {}（已保存 {}）…", name, fmt_size(resume_from))
+        } else {
+            format!("开始下载 {} …", name)
+        };
+        self.save_downloads();
         self.invalidate();
         std::thread::spawn(move || {
-            let result = updates_ui::download_package_ex(&name, &url, h, Some(id), Some(cancel));
+            // Transient failures (server hiccup, Wi-Fi roam) are common for
+            // multi-hundred-MB installers. Retry twice with backoff; every
+            // attempt resumes from the `.part` left by the previous one, so a
+            // retry never re-downloads what already landed on disk.
+            let mut attempt = 0u32;
+            let result = loop {
+                let already = updates_ui::partial_bytes(&name, &url);
+                let r = updates_ui::download_package_ex(
+                    &name,
+                    &url,
+                    h,
+                    Some(id),
+                    Some(cancel.clone()),
+                    already > 0,
+                );
+                if r.is_ok() || cancel.load(Ordering::Relaxed) || attempt >= MAX_RETRIES {
+                    break r;
+                }
+                attempt += 1;
+                let wait = 2u64 * attempt as u64;
+                post(
+                    h,
+                    crate::app::WM_APP_STATUS,
+                    Payload::Status(format!(
+                        "{} 中断，{} 秒后自动重试（{}/{}）…",
+                        name, wait, attempt, MAX_RETRIES
+                    )),
+                );
+                std::thread::sleep(std::time::Duration::from_secs(wait));
+            };
             post(h, WM_APP_DL_DONE, Payload::DlDone { id, result });
         });
+    }
+
+    /// Persist the durable part of every task. Called whenever state changes
+    /// (start / pause / finish / remove). Cheap: a handful of small JSON rows.
+    pub(crate) fn save_downloads(&self) {
+        use crate::persist::{self, SavedState, TaskSnapshot};
+        let snap: Vec<TaskSnapshot> = self
+            .downloads
+            .iter()
+            .map(|t| TaskSnapshot {
+                name: t.name.clone(),
+                url: t.url.clone(),
+                logo: t.logo.clone(),
+                state: SavedState::from(t.state),
+                done: updates_ui::partial_bytes(&t.name, &t.url),
+                total: t.total,
+                path: t.path.clone(),
+                error: t.error.clone(),
+            })
+            .collect();
+        persist::save(&snap);
+    }
+
+    /// Rebuild tasks from `downloads.json` on startup. A "Downloading" state
+    /// saved by a killed process becomes `Paused` (never auto-reconnect), and
+    /// a done task whose file vanished is marked failed with a clear message.
+    pub(crate) fn restore_downloads(&mut self) {
+        let snaps = crate::persist::load();
+        if snaps.is_empty() {
+            return;
+        }
+        let mut restored = 0usize;
+        let mut resumed_bytes = 0u64;
+        for s in snaps {
+            if s.name.is_empty() || !s.url.starts_with("http") {
+                continue;
+            }
+            self.next_dl_id += 1;
+            let mut state = DlState::from(s.state);
+            let mut path = s.path.clone();
+            let mut error = s.error.clone();
+            let saved_done = updates_ui::partial_bytes(&s.name, &s.url);
+            match state {
+                DlState::Done => {
+                    let alive = path
+                        .as_deref()
+                        .is_some_and(|p| std::path::Path::new(p).is_file());
+                    if !alive {
+                        state = DlState::Failed;
+                        error = Some("安装包已不在 Downloads 中，请重新下载".into());
+                        path = None;
+                    }
+                }
+                DlState::Paused | DlState::Downloading | DlState::Queued => {
+                    if saved_done > 0 {
+                        state = DlState::Paused;
+                        resumed_bytes += saved_done;
+                    } else {
+                        state = DlState::Canceled;
+                    }
+                }
+                _ => {}
+            }
+            self.downloads.push(DlTask {
+                id: self.next_dl_id,
+                name: s.name,
+                url: s.url,
+                logo: s.logo,
+                state,
+                done: saved_done,
+                total: if saved_done > 0 { s.total } else { 0 },
+                speed: 0.0,
+                disk_speed: 0.0,
+                path,
+                error,
+                cancel: Arc::new(AtomicBool::new(false)),
+            });
+            restored += 1;
+        }
+        if restored > 0 {
+            Self::net_log_restore(restored, resumed_bytes);
+        }
+    }
+
+    /// Pause a running task: flip the cancel flag, let the worker stop, and
+    /// keep its `.part` bytes. The state becomes `Paused` on the DONE callback.
+    pub fn pause_task(&mut self, id: u64) {
+        if let Some(t) = self.downloads.iter_mut().find(|t| t.id == id)
+            && matches!(t.state, DlState::Downloading | DlState::Queued)
+        {
+            let name = t.name.clone();
+            t.cancel.store(true, Ordering::Relaxed);
+            t.state = DlState::Paused;
+            t.speed = 0.0;
+            t.disk_speed = 0.0;
+            self.status = format!("已暂停 {}，进度已保存，可稍后继续", name);
+            self.save_downloads();
+            self.pump();
+            self.invalidate();
+        }
+    }
+
+    /// Resume a paused task (or retry a failed/cancelled one) from disk.
+    pub fn resume_task(&mut self, id: u64) {
+        self.start_task(id);
+    }
+
+    fn net_log_restore(restored: usize, resumed_bytes: u64) {
+        crate::net::log(&format!(
+            "RESTORE tasks={} resumable_bytes={}",
+            restored, resumed_bytes
+        ));
     }
 
     pub fn on_dl_progress(&mut self, id: u64, done: u64, total: u64, speed: f64, disk: f64) {
@@ -446,13 +659,21 @@ impl AppState {
                 t.state = DlState::Done;
                 t.path = Some(path.clone());
                 t.error = None;
+                t.done = t.total.max(t.done);
                 t.speed = 0.0;
                 t.disk_speed = 0.0;
+                // The installer now lives in Downloads; the staging partial
+                // is redundant. Remove it after the rename/copy succeeded.
+                let _ = std::fs::remove_file(updates_ui::part_path(&t.name, &t.url));
                 let short = path.rsplit(['\\', '/']).next().unwrap_or(&path);
                 self.status = format!("✓ {} 已下载到 Downloads（{}）", t.name, short);
             }
             Err(e) => {
-                t.state = if t.cancel.load(Ordering::Relaxed) {
+                // A pause pre-set this to Paused and flipped the cancel flag;
+                // keep it Paused so "继续" is offered (bytes are on disk).
+                t.state = if t.state == DlState::Paused {
+                    DlState::Paused
+                } else if t.cancel.load(Ordering::Relaxed) {
                     DlState::Canceled
                 } else {
                     DlState::Failed
@@ -468,6 +689,9 @@ impl AppState {
         if self.mode == crate::app::Mode::Updates {
             self.refresh_updates_local();
         }
+        self.save_downloads();
+        // A finished task frees its slot; give it to the next queued job.
+        self.pump();
         self.invalidate();
     }
 
@@ -475,6 +699,7 @@ impl AppState {
         if let Some(t) = self.downloads.iter().find(|t| t.id == id) {
             t.cancel.store(true, Ordering::Relaxed);
             self.status = format!("正在取消 {} 的下载…", t.name);
+            self.save_downloads();
             self.invalidate();
         }
     }
@@ -486,15 +711,25 @@ impl AppState {
     pub fn remove_task(&mut self, id: u64) {
         if let Some(t) = self.downloads.iter().find(|t| t.id == id) {
             t.cancel.store(true, Ordering::Relaxed);
+            // Drop the partial file too — removing a task is an explicit
+            // "forget this download" action, not a pause.
+            let _ = std::fs::remove_file(updates_ui::part_path(&t.name, &t.url));
         }
         self.downloads.retain(|t| t.id != id);
+        self.save_downloads();
         self.invalidate();
     }
 
     pub fn clear_finished(&mut self) {
+        for t in &self.downloads {
+            if !matches!(t.state, DlState::Queued | DlState::Downloading) {
+                let _ = std::fs::remove_file(updates_ui::part_path(&t.name, &t.url));
+            }
+        }
         self.downloads
             .retain(|t| matches!(t.state, DlState::Queued | DlState::Downloading));
         self.status = "已清空下载记录".into();
+        self.save_downloads();
         self.invalidate();
     }
 
@@ -964,6 +1199,14 @@ impl AppState {
                     format!("失败：{}", t.error.as_deref().unwrap_or("未知错误")),
                     p.danger,
                 ),
+                DlState::Paused => {
+                    let mut s = format!("已暂停  ·  {}", fmt_size(t.done));
+                    if t.total > 0 {
+                        s.push_str(&format!(" / {}", fmt_size(t.total)));
+                    }
+                    s.push_str("  ·  进度已保存，可继续");
+                    (s, p.sub)
+                }
                 DlState::Canceled => ("已取消下载".to_string(), p.sub),
             };
             self.gfx.text(
@@ -1004,9 +1247,38 @@ impl AppState {
                         &mut self.gfx,
                         p,
                         primary,
+                        "暂停",
+                        false,
+                        self.hover == Some((HIT_DL_PAUSE, i)),
+                        false,
+                    );
+                    draw_button(
+                        &mut self.gfx,
+                        p,
+                        secondary,
                         "取消",
                         false,
                         self.hover == Some((HIT_DL_CANCEL, i)),
+                        false,
+                    );
+                }
+                DlState::Paused => {
+                    draw_button(
+                        &mut self.gfx,
+                        p,
+                        primary,
+                        "继续",
+                        true,
+                        self.hover == Some((HIT_DL_RETRY, i)),
+                        false,
+                    );
+                    draw_button(
+                        &mut self.gfx,
+                        p,
+                        tertiary,
+                        "移除",
+                        false,
+                        self.hover == Some((HIT_DL_REMOVE, i)),
                         false,
                     );
                 }
@@ -1107,7 +1379,7 @@ impl AppState {
 fn is_dl_hit(k: u8) -> bool {
     matches!(
         k,
-        HIT_DL_CANCEL | HIT_DL_RETRY | HIT_DL_INSTALL | HIT_DL_OPEN | HIT_DL_REMOVE
+        HIT_DL_CANCEL | HIT_DL_RETRY | HIT_DL_INSTALL | HIT_DL_OPEN | HIT_DL_REMOVE | HIT_DL_PAUSE
     )
 }
 
@@ -1123,11 +1395,16 @@ pub(crate) fn hit_targets(st: &AppState, x: f32, y: f32) -> Option<(u8, usize)> 
         let t = &st.downloads[i];
         if in_rect(x, y, primary) {
             let kind = match t.state {
-                DlState::Downloading | DlState::Queued => HIT_DL_CANCEL,
+                DlState::Downloading | DlState::Queued => HIT_DL_PAUSE,
                 DlState::Done => HIT_DL_INSTALL,
                 _ => HIT_DL_RETRY,
             };
             return Some((kind, i));
+        }
+        // A running row puts "取消" (throw the partial bytes away) in the
+        // second slot, right next to "暂停" (keep them for later).
+        if in_rect(x, y, secondary) && matches!(t.state, DlState::Downloading | DlState::Queued) {
+            return Some((HIT_DL_CANCEL, i));
         }
         // "打开位置" only exists on a finished row; "移除" lives in the
         // leftmost slot so it stays put across Done and Failed states.
@@ -1135,7 +1412,10 @@ pub(crate) fn hit_targets(st: &AppState, x: f32, y: f32) -> Option<(u8, usize)> 
             return Some((HIT_DL_OPEN, i));
         }
         if in_rect(x, y, tertiary)
-            && matches!(t.state, DlState::Done | DlState::Failed | DlState::Canceled)
+            && matches!(
+                t.state,
+                DlState::Done | DlState::Failed | DlState::Canceled | DlState::Paused
+            )
         {
             return Some((HIT_DL_REMOVE, i));
         }
@@ -1150,6 +1430,7 @@ pub(crate) fn apply(st: &mut AppState, kind: u8, i: usize) {
     let path = st.downloads.get(i).and_then(|t| t.path.clone());
     match kind {
         HIT_DL_CANCEL => st.cancel_task(id),
+        HIT_DL_PAUSE => st.pause_task(id),
         HIT_DL_RETRY => st.retry_task(id),
         HIT_DL_REMOVE => st.remove_task(id),
         HIT_DL_INSTALL => st.install_task(id),

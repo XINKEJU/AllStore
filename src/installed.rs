@@ -16,6 +16,12 @@ pub struct Installed {
     pub icon: Option<String>,
     /// `InstallLocation` — used as a fallback when the icon is not an exe.
     pub location: Option<String>,
+    /// `Publisher` — shown on the "我的软件" page.
+    pub publisher: Option<String>,
+    /// `UninstallString` — the vendor's own remover, run only after the user
+    /// confirms in a modal prompt. `QuietUninstallString` is preferred when
+    /// present because it skips the vendor's ad-laden wizard.
+    pub uninstall: Option<String>,
 }
 
 const HKLM_PATHS: [&str; 2] = [
@@ -140,6 +146,8 @@ fn scan_root(root: HKEY, path: &str, out: &mut Vec<Installed>) {
             let icon = read_string(item, "DisplayIcon");
             let location = read_string(item, "InstallLocation");
             let publisher = read_string(item, "Publisher").unwrap_or_default();
+            let uninstall = read_string(item, "QuietUninstallString")
+                .or_else(|| read_string(item, "UninstallString"));
             let system = read_dword(item, "SystemComponent");
             let parent = read_string(item, "ParentKeyName");
             let release = read_string(item, "ReleaseType");
@@ -157,6 +165,8 @@ fn scan_root(root: HKEY, path: &str, out: &mut Vec<Installed>) {
                 version,
                 icon,
                 location,
+                publisher: (!publisher.is_empty()).then_some(publisher),
+                uninstall,
             });
         }
         let _ = RegCloseKey(h);

@@ -84,47 +84,27 @@ pub fn save_cache(cache: &Cache) {
     }
 }
 
-/// Pull a broad catalog using only whitelisted endpoints. A failed category
-/// is skipped instead of aborting the whole check.
+/// Pull a broad catalog from every enabled source. A failed source is skipped
+/// (its warning is logged) instead of aborting the whole check, so the store
+/// still opens when one feed is down.
 fn catalog(token: &str, progress: &mut dyn FnMut(usize, usize)) -> Result<Vec<App>, String> {
-    let groups = net::classes(token)?;
-    let mut targets: Vec<(String, String)> = vec![("soft".into(), "-1".into())];
-    if let Some(g) = groups.iter().find(|g| g.code == "soft") {
-        for c in g.list.iter().take(6) {
-            if c.name == "全部" || c.id.is_empty() {
-                continue;
-            }
-            targets.push((g.code.clone(), c.id.clone()));
-        }
+    let merged = crate::source::catalog(token, progress);
+    net::log(&format!(
+        "CATALOG merged={} sources={:?}",
+        merged.apps.len(),
+        merged.sources
+    ));
+    for w in &merged.warnings {
+        net::log(&format!("SOURCE warn {}", w));
     }
-    if targets.len() == 1 {
-        for g in groups.iter().take(4) {
-            targets.push((g.code.clone(), "-1".into()));
-        }
+    if merged.apps.is_empty() {
+        return Err(if merged.warnings.is_empty() {
+            "无法获取应用目录".to_string()
+        } else {
+            merged.warnings.join("；")
+        });
     }
-
-    let total = targets.len();
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    let mut failures = 0usize;
-    for (i, (code, id)) in targets.iter().enumerate() {
-        progress(i, total);
-        match net::class_apps(token, code, id, 60) {
-            Ok(list) => {
-                for a in list {
-                    if !a.id.is_empty() && seen.insert(a.id.clone()) {
-                        out.push(a);
-                    }
-                }
-            }
-            Err(_) => failures += 1,
-        }
-    }
-    progress(total, total);
-    if out.is_empty() && failures > 0 {
-        return Err("无法获取应用目录".into());
-    }
-    Ok(out)
+    Ok(merged.apps)
 }
 
 pub fn check(token: &str, progress: &mut dyn FnMut(usize, usize)) -> Result<CheckResult, String> {

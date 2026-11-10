@@ -200,17 +200,32 @@ fn query_header(request: *mut c_void, info: u32) -> Option<String> {
 }
 
 type Sink<'a> = Option<&'a mut dyn FnMut(&[u8]) -> bool>;
-/// Called once with Content-Length as soon as the final 2xx headers arrive,
-/// before the body starts streaming. Without it a progress bar has no
-/// denominator until the download is already over.
-type MetaSink<'a> = Option<&'a mut dyn FnMut(u64)>;
+/// Called once as soon as the final 2xx headers arrive, before the body
+/// streams. Args: (total_size_of_the_whole_file, is_partial_206). For a 200
+/// this is just Content-Length; for a 206 it is `Range.start + Content-Length`
+/// so a progress bar keeps the *whole* file as its denominator.
+type MetaSink<'a> = Option<&'a mut dyn FnMut(u64, bool)>;
 
 struct OneResp {
     status: u32,
     location: Option<String>,
     content_length: Option<u64>,
     bytes: Vec<u8>,
+    /// Bytes read from this response body (a 206 body = remaining range).
     total: u64,
+    /// Size of the complete file (206: range start + length; else length).
+    whole_total: u64,
+}
+
+/// Parse `bytes START-END/TOTAL` from a Content-Range header. Returns
+/// (start, total) or None for an unrangeable/malformed response.
+pub fn parse_content_range(v: &str) -> Option<(u64, u64)> {
+    let v = v.trim();
+    let body = v.strip_prefix("bytes ")?;
+    let (span, total) = body.rsplit_once('/')?;
+    let total: u64 = total.parse().ok()?;
+    let start = span.split('-').next()?.trim().parse::<u64>().ok()?;
+    Some((start, total))
 }
 
 /// A single HTTP round trip. Redirect bodies are discarded; only a final 2xx
@@ -219,6 +234,9 @@ fn one(
     method: &str,
     url: &str,
     headers: &[(&str, String)],
+    // Headers safe to forward on *every* redirect hop (currently Range).
+    // `headers` above are identity headers and stay on hop 0 only.
+    carry: &[(&str, String)],
     body: Option<&[u8]>,
     sink: &mut Sink<'_>,
     meta: &mut MetaSink<'_>,
@@ -260,7 +278,7 @@ fn one(
         let _ = WinHttpSetTimeouts(request, 10000, 15000, 15000, 60000);
 
         let mut hdr = String::new();
-        for (k, v) in headers {
+        for (k, v) in headers.iter().chain(carry.iter()) {
             hdr.push_str(k);
             hdr.push_str(": ");
             hdr.push_str(v);
@@ -292,14 +310,26 @@ fn one(
                 content_length,
                 bytes: Vec::new(),
                 total: 0,
+                whole_total: 0,
             });
         }
         let success = (200..300).contains(&status);
+        // 206 Partial Content: the body is only the remaining range. The
+        // complete file size comes from Content-Range (start + length), which
+        // is what the progress bar must use as its denominator.
+        let partial = status == 206;
+        let whole_total = if partial {
+            query_header(request, WINHTTP_QUERY_CONTENT_RANGE)
+                .and_then(|s| parse_content_range(&s).map(|(_, total)| total))
+                .or(content_length)
+        } else {
+            content_length
+        };
         if success
-            && let Some(expected) = content_length
+            && let Some(total) = whole_total
             && let Some(f) = meta.as_mut()
         {
-            f(expected);
+            f(total, partial);
         }
 
         let mut bytes = Vec::new();
@@ -343,6 +373,7 @@ fn one(
             content_length,
             bytes,
             total,
+            whole_total: whole_total.unwrap_or(total),
         })
     }
 }
@@ -351,6 +382,10 @@ pub struct HttpResponse {
     pub bytes: Vec<u8>,
     pub final_url: String,
     pub content_length: Option<u64>,
+    /// True when the server honoured a Range request with 206.
+    pub resumed: bool,
+    /// Size of the complete file (206: range start + length, 200: length).
+    pub whole_total: u64,
 }
 
 /// Perform a request, following up to six redirects manually.
@@ -358,6 +393,9 @@ fn request(
     method: &str,
     url: &str,
     headers: &[(&str, String)],
+    // Safe-to-forward headers (Range) present on *every* hop, including the
+    // final CDN after a redirect. Identity headers above stay on hop 0.
+    carry: &[(&str, String)],
     body: Option<&[u8]>,
     mut sink: Sink<'_>,
     mut meta: MetaSink<'_>,
@@ -374,6 +412,7 @@ fn request(
             &cur_method,
             &current,
             send_headers,
+            carry,
             cur_body,
             &mut sink,
             &mut meta,
@@ -431,6 +470,8 @@ fn request(
             bytes: r.bytes,
             final_url: current,
             content_length: r.content_length,
+            resumed: r.status == 206,
+            whole_total: r.whole_total,
         });
     }
     Err("重定向次数过多，已放弃下载".into())
@@ -443,7 +484,7 @@ fn http(
     headers: &[(&str, String)],
     body: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
-    request(method, url, headers, body, None, None).map(|r| r.bytes)
+    request(method, url, headers, &[], body, None, None).map(|r| r.bytes)
 }
 
 fn identity_headers(token: &str) -> Vec<(&'static str, String)> {
@@ -559,25 +600,59 @@ pub fn fetch_binary(url: &str) -> Result<Vec<u8>, String> {
     http("GET", url, &[], None)
 }
 
+/// Fetch and parse a small JSON document from any host (used by the extra
+/// software sources, which do not belong to the Lenovo token API).
+pub fn fetch_json(url: &str) -> Result<serde_json::Value, String> {
+    let body = fetch_binary(url)?;
+    serde_json::from_slice(&body).map_err(|e| format!("JSON：{}", e))
+}
+
 /// Metadata returned after a streamed package download. The final URL lets the
 /// caller pick a truthful file extension instead of blindly writing `.exe`.
 pub struct Fetch {
     pub final_url: String,
+    /// Bytes delivered by *this* response (a 206 body = remaining range).
     pub size: u64,
+    /// Size of the complete file across all ranges.
+    pub total: u64,
+    /// True when the server honoured `Range` with 206 Partial Content.
+    pub resumed: bool,
 }
 
-/// Stream an installer to `sink`, reporting Content-Length as soon as the
+/// Stream an installer to `sink`, reporting the whole-file size as soon as the
 /// final response headers arrive so the UI can draw a real percentage from
-/// byte 0. Returning `false` from the sink aborts the transfer.
+/// byte 0. `meta` receives (whole_file_size, is_partial_206). Returning `false`
+/// from the sink aborts the transfer.
+#[allow(dead_code)] // convenience wrapper, exercised by the live tests
 pub fn fetch_binary_stream(
     url: &str,
     sink: &mut dyn FnMut(&[u8]) -> bool,
-    meta: &mut dyn FnMut(u64),
+    meta: &mut dyn FnMut(u64, bool),
 ) -> Result<Fetch, String> {
-    let r = request("GET", url, &[], None, Some(sink), Some(meta))?;
+    fetch_binary_stream_resume(url, 0, sink, meta)
+}
+
+/// Same as `fetch_binary_stream` but asks the server for bytes `[from..]`.
+/// A `Range` header is attached to *every* redirect hop so it survives the
+/// store's 302-to-CDN dance. Servers that ignore it reply 200 with the full
+/// body; `Fetch.resumed` is then false and the caller must overwrite from 0.
+pub fn fetch_binary_stream_resume(
+    url: &str,
+    from: u64,
+    sink: &mut dyn FnMut(&[u8]) -> bool,
+    meta: &mut dyn FnMut(u64, bool),
+) -> Result<Fetch, String> {
+    let carry: Vec<(&str, String)> = if from > 0 {
+        vec![("Range", format!("bytes={}-", from))]
+    } else {
+        Vec::new()
+    };
+    let r = request("GET", url, &[], &carry, None, Some(sink), Some(meta))?;
     Ok(Fetch {
         final_url: r.final_url,
-        size: r.content_length.unwrap_or(0),
+        size: r.content_length.unwrap_or(r.whole_total),
+        total: r.whole_total,
+        resumed: r.resumed,
     })
 }
 
@@ -607,6 +682,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_content_range_for_resume() {
+        assert_eq!(
+            parse_content_range("bytes 1048576-2097151/4194304"),
+            Some((1048576, 4194304))
+        );
+        assert_eq!(parse_content_range("bytes 0-99/100"), Some((0, 100)));
+        // An unknown total (`*`) cannot give the progress bar a denominator.
+        assert_eq!(parse_content_range("bytes 0-99/*"), None);
+        assert_eq!(parse_content_range("garbage"), None);
+        assert_eq!(parse_content_range("bytes /100"), None);
+    }
+
+    #[test]
     fn splits_urls_with_query_and_ipv6() {
         let u = split_url("https://host.cn:8443/dlservice/download?softid=L1#frag").unwrap();
         assert_eq!(u.host, "host.cn");
@@ -627,7 +715,7 @@ mod tests {
         let url = format!("{}/dlservice/download?softid=L120416", BASE);
         let mut sink: Sink<'_> = None;
         let mut meta: MetaSink<'_> = None;
-        let r = one("GET", &url, &[], None, &mut sink, &mut meta).expect("request failed");
+        let r = one("GET", &url, &[], &[], None, &mut sink, &mut meta).expect("request failed");
         assert_eq!(r.status, 302, "expected redirect, got {}", r.status);
         let loc = r.location.expect("missing Location header");
         assert!(loc.starts_with("http://"), "unexpected Location: {}", loc);
@@ -642,6 +730,7 @@ mod tests {
         let result = request(
             "GET",
             &url,
+            &[],
             &[],
             None,
             Some(&mut |chunk: &[u8]| -> bool {

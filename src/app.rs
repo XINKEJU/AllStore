@@ -17,6 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::downloads::{self, DlState, DlTask};
 use crate::gfx::{self, Gfx, Palette};
 use crate::installed::{InstalledApp, Inventory};
+use crate::library;
 use crate::model::{App, ClassGroup, Detail, html_to_text};
 use crate::net;
 use crate::update::{self, UpdateItem};
@@ -83,6 +84,17 @@ pub const HIT_IGNORED_RESTORE: u8 = 19;
 pub const HIT_IGNORED_ALL: u8 = 20;
 pub const HIT_REINSTALL: u8 = 21;
 pub const HIT_DL_INSTALL: u8 = 22;
+/// Pause / resume a task from the download centre (Range-based continuation).
+pub const HIT_DL_PAUSE: u8 = 23;
+// "我的软件" local library page.
+pub const HIT_LIB_OPEN: u8 = 24;
+pub const HIT_LIB_LOCATE: u8 = 25;
+pub const HIT_LIB_UPDATE: u8 = 26;
+pub const HIT_LIB_UNINSTALL: u8 = 27;
+// Source selector in the header.
+pub const HIT_SOURCE: u8 = 28;
+/// Rescan the registry inventory on the "我的软件" page.
+pub const HIT_LIB_REFRESH: u8 = 32;
 
 pub enum Payload {
     Data(Result<(String, Vec<ClassGroup>, Vec<App>), String>),
@@ -124,6 +136,7 @@ pub enum NavKind {
     Browse,
     Updates,
     Downloads,
+    Library,
 }
 
 #[derive(Clone)]
@@ -142,6 +155,7 @@ pub enum Mode {
     Detail,
     Updates,
     Downloads,
+    Library,
 }
 
 pub struct AppState {
@@ -153,6 +167,13 @@ pub struct AppState {
     pub nav: Vec<NavItem>,
     pub active_nav: usize,
     pub apps: Vec<App>,
+    /// Unfiltered result list backing `apps`; switching the source chip only
+    /// re-filters this in memory, so no request is issued.
+    pub catalog_all: Vec<App>,
+    /// `None` = every source, otherwise a source display name.
+    pub source_filter: Option<String>,
+    /// Source names present in the current list, in first-seen order.
+    pub sources: Vec<String>,
     pub list_title: String,
     pub search: Vec<u16>,
     pub focus_search: bool,
@@ -191,6 +212,8 @@ pub struct AppState {
     pub(crate) last_local_scan: Instant,
     /// Download centre tasks; the single source of truth for every progress UI.
     pub downloads: Vec<DlTask>,
+    /// Rows of the "我的软件" page, rebuilt from the registry snapshot.
+    pub lib_rows: Vec<library::LibRow>,
     pub next_dl_id: u64,
     /// Rolling 36-second transfer history for the Steam-style speed graph.
     pub speed_history: VecDeque<downloads::SpeedSample>,
@@ -281,9 +304,19 @@ impl AppState {
                     kind: NavKind::Downloads,
                     group: 1,
                 },
+                NavItem {
+                    label: "我的软件".into(),
+                    code: String::new(),
+                    id: String::new(),
+                    kind: NavKind::Library,
+                    group: 1,
+                },
             ],
             active_nav: 0,
             apps: Vec::new(),
+            catalog_all: Vec::new(),
+            source_filter: None,
+            sources: Vec::new(),
             list_title: "推荐应用".into(),
             search: Vec::new(),
             focus_search: false,
@@ -309,12 +342,22 @@ impl AppState {
             inventory: Inventory::default(),
             last_local_scan: Instant::now(),
             downloads: Vec::new(),
+            lib_rows: Vec::new(),
             next_dl_id: 0,
             speed_history: VecDeque::with_capacity(downloads::SPEED_SAMPLES),
             list_epoch: 0,
             detail_epoch: 0,
             pending_icons: HashSet::new(),
         };
+        // Restore the durable download queue BEFORE cleaning the temp folder,
+        // so partials belonging to live tasks are kept and can be resumed.
+        state.restore_downloads();
+        let live_keys: Vec<String> = state
+            .downloads
+            .iter()
+            .map(|t| updates_ui::part_key(&t.name, &t.url))
+            .collect();
+        updates_ui::cleanup_temp(&live_keys);
         // One registry walk at start-up feeds both the update badge and the
         // "installed" badges on every store card. No I/O happens while painting.
         state.refresh_updates_local();
@@ -543,18 +586,83 @@ impl AppState {
     }
 
     fn set_apps(&mut self, apps: Vec<App>, title: &str) {
-        self.apps = apps;
+        self.catalog_all = apps;
+        let mut sources: Vec<String> = Vec::new();
+        for a in &self.catalog_all {
+            if !sources.iter().any(|s| s == a.origin()) {
+                sources.push(a.origin().to_string());
+            }
+        }
+        self.sources = sources;
+        // A Lenovo-only category cannot honour a "腾讯" filter: fall back to
+        // "all sources" instead of showing an empty page.
+        if self
+            .source_filter
+            .as_ref()
+            .is_some_and(|f| !self.sources.contains(f))
+        {
+            self.source_filter = None;
+        }
+        self.apply_source_filter();
         self.list_title = title.to_string();
         self.scroll = 0;
         self.mode = Mode::Browse;
         self.loading = false;
-        self.status = format!(
-            "{}  ·  共 {} 款应用  ·  纯净模式（无运营位 / 无遥测）",
-            title,
-            self.apps.len()
-        );
+        self.status = match &self.source_filter {
+            Some(f) => format!(
+                "{}  ·  仅看 {} 源  ·  共 {} 款应用",
+                title,
+                f,
+                self.apps.len()
+            ),
+            None if self.sources.len() > 1 => format!(
+                "{}  ·  {} 个源  ·  共 {} 款应用  ·  纯净模式（无运营位 / 无遥测）",
+                title,
+                self.sources.len(),
+                self.apps.len()
+            ),
+            None => format!(
+                "{}  ·  共 {} 款应用  ·  纯净模式（无运营位 / 无遥测）",
+                title,
+                self.apps.len()
+            ),
+        };
         self.queue_icons();
         self.invalidate();
+    }
+
+    /// Rebuild the visible list from the unfiltered one. Pure in-memory, so
+    /// clicking a source chip is instant and never hits the network.
+    pub(crate) fn apply_source_filter(&mut self) {
+        self.apps = match &self.source_filter {
+            Some(f) => self
+                .catalog_all
+                .iter()
+                .filter(|a| a.origin() == f)
+                .cloned()
+                .collect(),
+            None => self.catalog_all.clone(),
+        };
+        let max = self.max_scroll();
+        self.scroll = self.scroll.min(max).max(0);
+    }
+
+    pub(crate) fn set_source_filter(&mut self, filter: Option<String>) {
+        self.source_filter = filter;
+        self.apply_source_filter();
+        self.scroll = 0;
+        self.status = match &self.source_filter {
+            Some(f) => format!("仅显示 {} 源的应用  ·  {} 款", f, self.apps.len()),
+            None => format!("显示全部软件源  ·  {} 款应用", self.apps.len()),
+        };
+        self.queue_icons();
+        self.invalidate();
+    }
+
+    /// Source chips live in the hero banner, replacing the decorative tagline.
+    /// Fixed-width chips keep the hit-test independent of glyph metrics.
+    fn source_chip_rects(&self, w: f32) -> Vec<(D2D_RECT_F, Option<String>)> {
+        source_chips(w, &self.sources)
     }
 
     pub(crate) fn invalidate(&self) {
@@ -573,6 +681,7 @@ impl AppState {
             ("推荐", "soft", "-1", NavKind::Browse, 0u8),
             ("软件更新", "", "", NavKind::Updates, 1u8),
             ("下载管理", "", "", NavKind::Downloads, 1u8),
+            ("我的软件", "", "", NavKind::Library, 1u8),
         ] {
             self.nav.push(NavItem {
                 label: label.into(),
@@ -634,6 +743,10 @@ impl AppState {
                 self.invalidate();
                 return;
             }
+            NavKind::Library => {
+                self.show_library();
+                return;
+            }
             NavKind::Browse => {}
         }
         let epoch = self.next_epoch();
@@ -644,7 +757,14 @@ impl AppState {
         let token = self.token.clone();
         let label = item.label.clone();
         std::thread::spawn(move || {
-            let r = net::class_apps(&token, &item.code, &item.id, 36).map(|v| (v, label));
+            let r = net::class_apps(&token, &item.code, &item.id, 36).map(|mut v| {
+                // Category pages come from the Lenovo API only; tag them so the
+                // source chip row stays truthful after a category jump.
+                for a in &mut v {
+                    a.source = Some(crate::source::LENOVO.into());
+                }
+                (v, label)
+            });
             post(h, WM_APP_LIST, Payload::List(r, epoch));
         });
     }
@@ -664,8 +784,23 @@ impl AppState {
         self.invalidate();
         let h = self.hwnd_usize();
         let token = self.token.clone();
+        // Tencent and custom rows have no search endpoint, so their part of
+        // the search is answered from the catalog already in memory.
+        let local = self.catalog_all.clone();
         std::thread::spawn(move || {
-            let r = net::search(&token, &kw).map(|v| (v, format!("搜索：{}", kw)));
+            let r = net::search(&token, &kw).map(|mut remote| {
+                for a in &mut remote {
+                    if a.source.is_none() {
+                        a.source = Some(crate::source::LENOVO.into());
+                    }
+                }
+                for a in crate::source::search_local(&local, &kw) {
+                    if !remote.iter().any(|x| x.id == a.id) {
+                        remote.push(a);
+                    }
+                }
+                (remote, format!("搜索：{}", kw))
+            });
             post(h, WM_APP_LIST, Payload::List(r, epoch));
         });
     }
@@ -685,6 +820,13 @@ impl AppState {
         let h = self.hwnd_usize();
         let token = self.token.clone();
         let id = self.apps[idx].id.clone();
+        if !self.apps[idx].has_remote_detail() {
+            // Only the Lenovo API has a details endpoint. For other sources
+            // the list metadata is the truth; asking would just log an error.
+            self.status = "应用详情  ·  数据来自聚合目录".into();
+            self.invalidate();
+            return;
+        }
         std::thread::spawn(move || {
             post(
                 h,
@@ -704,7 +846,11 @@ impl AppState {
         let existing = self.task_for(&app.name).map(|t| (t.id, t.state));
         if let Some((id, state)) = existing {
             match state {
-                DlState::Downloading | DlState::Queued => self.cancel_task(id),
+                // Pausing keeps the partial bytes on disk, so the same button
+                // can continue later (and after a restart) instead of starting
+                // the transfer over.
+                DlState::Downloading | DlState::Queued => self.pause_task(id),
+                DlState::Paused => self.resume_task(id),
                 DlState::Failed | DlState::Canceled => self.retry_task(id),
                 DlState::Done => {
                     // A finished primary action installs the package. The
@@ -955,6 +1101,9 @@ impl AppState {
             if !dev.is_empty() {
                 info.push(("开发者".into(), dev));
             }
+            if let Some(src) = a.map(|x| x.origin().to_string()) {
+                info.push(("软件源".into(), src));
+            }
             let local = a.and_then(|x| self.inventory.status(&x.name, version.as_deref()));
             match local {
                 Some(st) => {
@@ -1013,6 +1162,7 @@ impl AppState {
             }
             Mode::Updates => self.update_max_scroll(),
             Mode::Downloads => self.dl_max_scroll(),
+            Mode::Library => self.lib_max_scroll(),
             Mode::Detail => {
                 let layout = self.detail_layout(self.width as f32);
                 let visible = (h - STATUS_H - DETAIL_BODY_TOP).max(0.0);
@@ -1076,6 +1226,7 @@ impl AppState {
             Mode::Detail => self.render_detail(w, h),
             Mode::Updates => self.render_updates(w, h),
             Mode::Downloads => self.render_downloads(w, h),
+            Mode::Library => self.render_library(w, h),
             Mode::Browse => self.render_browse(w, h),
         }
         self.draw_scrollbar(w, h);
@@ -1214,7 +1365,7 @@ impl AppState {
             .map(|n| match n.kind {
                 NavKind::Updates => self.updates.len(),
                 NavKind::Downloads => active_downloads,
-                NavKind::Browse => 0,
+                NavKind::Browse | NavKind::Library => 0,
             })
             .collect();
         // Reserve the footer band: without this the last category row was
@@ -1315,18 +1466,47 @@ impl AppState {
                 true,
                 p.text,
             );
-            self.gfx.text(
-                "无广告  ·  无遥测  ·  纯净官方目录",
-                gfx::rect(
-                    hero.left + 24.0,
-                    hero.top + 48.0,
-                    text_right,
-                    hero.top + 74.0,
-                ),
-                11,
-                false,
-                p.sub,
-            );
+            // Source chips replace the old static tagline: they show where the
+            // catalog comes from and double as a one-click filter.
+            let chips = self.source_chip_rects(w);
+            let filter = self.source_filter.clone();
+            let hover = self.hover;
+            for (i, (r, src)) in chips.iter().enumerate() {
+                let active = *src == filter;
+                let label = match src {
+                    None => "全部源".to_string(),
+                    Some(s) => s.clone(),
+                };
+                self.gfx
+                    .round(*r, 9.0, if active { p.accent } else { p.bg });
+                if !active {
+                    self.gfx.outline(*r, p.border, 0.8);
+                }
+                if hover == Some((HIT_SOURCE, i)) {
+                    self.gfx.outline(*r, p.accent, 1.4);
+                }
+                self.gfx.center_text(
+                    &label,
+                    *r,
+                    11,
+                    true,
+                    if active { p.on_accent } else { p.text },
+                );
+            }
+            if chips.is_empty() {
+                self.gfx.text(
+                    "多源聚合",
+                    gfx::rect(
+                        hero.left + 24.0,
+                        hero.top + 48.0,
+                        text_right,
+                        hero.top + 74.0,
+                    ),
+                    11,
+                    false,
+                    p.sub,
+                );
+            }
             self.gfx.text(
                 &format!("{} 款应用", self.apps.len()),
                 gfx::rect(stat_left, hero.top + 16.0, stat_right, hero.top + 46.0),
@@ -1461,6 +1641,7 @@ impl AppState {
                 let text = match state {
                     DlState::Downloading => format!("{}  ·  下载中", pct),
                     DlState::Queued => "等待下载…".into(),
+                    DlState::Paused => format!("{}  ·  已暂停，点击继续", pct),
                     DlState::Done => "已下载  ·  点击安装".into(),
                     DlState::Failed => "下载失败，可重试".into(),
                     DlState::Canceled => "已取消，可重试".into(),
@@ -1510,7 +1691,8 @@ impl AppState {
                 .then(|| local_states.get(i).and_then(|x| x.as_ref()))
                 .flatten();
             let label = match task.map(|t| t.0) {
-                Some(DlState::Downloading | DlState::Queued) => "取消",
+                Some(DlState::Downloading | DlState::Queued) => "暂停",
+                Some(DlState::Paused) => "继续",
                 Some(DlState::Done) => "安装",
                 Some(DlState::Failed | DlState::Canceled) => "重试",
                 None => match local {
@@ -1699,7 +1881,8 @@ impl AppState {
                 .text("获取后保存到 Downloads", hint, 11, false, p.sub);
         }
         let label = match task.as_ref().map(|t| t.0) {
-            Some(DlState::Downloading | DlState::Queued) => "取消",
+            Some(DlState::Downloading | DlState::Queued) => "暂停",
+            Some(DlState::Paused) => "继续下载",
             Some(DlState::Done) => "安装",
             Some(DlState::Failed | DlState::Canceled) => "重试",
             None => match &local {
@@ -1859,9 +2042,15 @@ impl AppState {
             }
             Mode::Updates => updates_ui::hit_targets(self, x, y),
             Mode::Downloads => downloads::hit_targets(self, x, y),
+            Mode::Library => library::hit_targets(self, x, y),
             Mode::Browse => {
                 if in_rect(x, y, Self::hero_dl_rect(w)) {
                     return Some((HIT_DL_NAV, 0));
+                }
+                for (i, (r, _)) in self.source_chip_rects(w).iter().enumerate() {
+                    if in_rect(x, y, *r) {
+                        return Some((HIT_SOURCE, i));
+                    }
                 }
                 for i in 0..self.apps.len() {
                     if let Some(c) = self.card_rect(i)
@@ -1905,6 +2094,14 @@ impl AppState {
                 self.scroll = 0;
                 self.invalidate();
             }
+            Some((HIT_SOURCE, i)) => {
+                let next = if i == 0 {
+                    None
+                } else {
+                    self.sources.get(i - 1).cloned()
+                };
+                self.set_source_filter(next);
+            }
             Some((HIT_DOWNLOAD, 0)) => {
                 let i = self.detail_index;
                 self.start_download(i, false);
@@ -1930,9 +2127,16 @@ impl AppState {
                 self.invalidate();
             }
             Some((kind, i))
-                if (HIT_DL_CANCEL..=HIT_DL_CLEAR).contains(&kind) || kind == HIT_DL_INSTALL =>
+                if (HIT_DL_CANCEL..=HIT_DL_CLEAR).contains(&kind)
+                    || matches!(kind, HIT_DL_INSTALL | HIT_DL_PAUSE) =>
             {
                 downloads::apply(self, kind, i);
+            }
+            Some((kind, i))
+                if kind == HIT_LIB_REFRESH
+                    || (HIT_LIB_OPEN..=HIT_LIB_UNINSTALL).contains(&kind) =>
+            {
+                library::apply(self, kind, i);
             }
             Some((kind, i))
                 if (HIT_CHECK..=HIT_ROW).contains(&kind)
@@ -2237,14 +2441,65 @@ pub(crate) fn in_rect(x: f32, y: f32, r: D2D_RECT_F) -> bool {
     x >= r.left && x <= r.right && y >= r.top && y <= r.bottom
 }
 
+/// Source filter chips ("全部源 / 联想 / 腾讯 / …") laid out inside the hero
+/// banner. Kept as a free function so the geometry is unit-testable without a
+/// window; the renderer and the hit-test both call it.
+pub(crate) fn source_chips(w: f32, sources: &[String]) -> Vec<(D2D_RECT_F, Option<String>)> {
+    let hero = gfx::rect(NAV_W + PAD, TOP_H + 14.0, w - PAD, TOP_H + 14.0 + HERO_H);
+    let btn = AppState::hero_dl_rect(w);
+    let stat_right = btn.left - 20.0;
+    let stat_left = stat_right - 150.0;
+    let right = stat_left - 20.0;
+    let mut out = Vec::new();
+    if right < hero.left + 120.0 {
+        return out;
+    }
+    let mut x = hero.left + 24.0;
+    // Starts below the 19 px title band (top+12..top+48) so the two never
+    // touch, and stays inside the 88 px hero card.
+    let y0 = hero.top + 48.0;
+    let y1 = y0 + 26.0;
+    let mut items: Vec<Option<String>> = vec![None];
+    items.extend(sources.iter().take(4).cloned().map(Some));
+    for it in items {
+        let label = match &it {
+            None => "全部源".to_string(),
+            Some(s) => s.clone(),
+        };
+        let cw = (label.chars().count() as f32 * 12.0 + 22.0).max(52.0);
+        if x + cw > right {
+            break;
+        }
+        out.push((gfx::rect(x, y0, x + cw, y1), it));
+        x += cw + 8.0;
+    }
+    out
+}
+
 /// Kick off the initial network load on a worker thread.
 pub fn start_load(hwnd_usize: usize) {
     std::thread::spawn(move || {
         let result = (|| -> Result<(String, Vec<ClassGroup>, Vec<App>), String> {
             let token = net::register()?;
             let classes = net::classes(&token)?;
-            let apps = net::class_apps(&token, "soft", "-1", 36)?;
-            Ok((token, classes, apps))
+            // One merged list from every enabled source; the sidebar still
+            // navigates Lenovo categories, the landing page shows everything.
+            let mut progress = |d: usize, t: usize| {
+                post(
+                    hwnd_usize,
+                    WM_APP_STATUS,
+                    Payload::Status(format!("正在聚合软件源 {}/{}…", d, t)),
+                );
+            };
+            let merged = crate::source::catalog(&token, &mut progress);
+            if merged.apps.is_empty() {
+                return Err(if merged.warnings.is_empty() {
+                    "无法获取应用目录".to_string()
+                } else {
+                    merged.warnings.join("；")
+                });
+            }
+            Ok((token, classes, merged.apps))
         })();
         post(hwnd_usize, WM_APP_DATA, Payload::Data(result));
     });
@@ -2368,6 +2623,42 @@ mod tests {
 
     fn banner_bottom_for_test(hero: D2D_RECT_F) -> f32 {
         hero.bottom
+    }
+
+    /// The source chips replaced the tagline; they must stay inside the hero,
+    /// clear of the stats column, and never overlap each other.
+    #[test]
+    fn source_chips_stay_inside_the_banner() {
+        let sources = vec![
+            "联想".to_string(),
+            "腾讯".to_string(),
+            "我的内网源".to_string(),
+        ];
+        for w in [760.0f32, 900.0, 1100.0, 1600.0] {
+            let hero = gfx::rect(NAV_W + PAD, TOP_H + 14.0, w - PAD, TOP_H + 14.0 + HERO_H);
+            let btn = AppState::hero_dl_rect(w);
+            let text_right = btn.left - 20.0 - 150.0 - 20.0;
+            let chips = source_chips(w, &sources);
+            if chips.is_empty() {
+                // Only acceptable when there is genuinely no room left.
+                assert!(text_right < hero.left + 120.0, "w={w}: chips dropped early");
+                continue;
+            }
+            assert_eq!(
+                chips[0].0.left,
+                hero.left + 24.0,
+                "w={w}: first chip offset"
+            );
+            for (i, (r, _)) in chips.iter().enumerate() {
+                assert!(r.right > r.left, "w={w}: chip {i} has no width");
+                assert!(r.top > hero.top + 40.0, "w={w}: chip {i} hits the title");
+                assert!(r.bottom < hero.bottom, "w={w}: chip {i} leaves the hero");
+                assert!(r.right <= text_right, "w={w}: chip {i} enters the stats");
+                if i > 0 {
+                    assert!(r.left > chips[i - 1].0.right, "w={w}: chips {i} overlap");
+                }
+            }
+        }
     }
 
     #[test]

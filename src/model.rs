@@ -30,11 +30,28 @@ pub struct App {
     #[serde(default)]
     #[serde(rename = "isAdvert")]
     pub is_advert: Option<bool>,
+    /// Display name of the feed that produced this row (`联想`, `腾讯`, …).
+    /// Set by `source` when catalogs are merged; absent in older caches.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Short description supplied by feeds that have no HTML intro (Tencent
+    /// only publishes a category, custom feeds may ship a sentence).
+    #[serde(default)]
+    pub desc: Option<String>,
 }
 
 impl App {
     pub fn logo_url(&self) -> Option<&str> {
         self.logo.as_deref().filter(|s| s.starts_with("http"))
+    }
+    /// Feed this row came from, for the "来源" chip and the log line.
+    pub fn origin(&self) -> &str {
+        self.source.as_deref().unwrap_or("联想")
+    }
+    /// Only the Lenovo catalog has a details endpoint; other rows render from
+    /// the list metadata instead of issuing a request that is certain to fail.
+    pub fn has_remote_detail(&self) -> bool {
+        self.id.starts_with('L')
     }
     pub fn download_url(&self) -> String {
         for u in [&self.dl_a, &self.dl_b] {
@@ -54,6 +71,9 @@ impl App {
         }
     }
     pub fn subtitle(&self) -> String {
+        if let Some(d) = self.desc.as_deref().filter(|d| !d.trim().is_empty()) {
+            return html_to_text(d);
+        }
         html_to_text(self.introduction.as_deref().unwrap_or(""))
     }
     pub fn meta(&self) -> String {
@@ -202,6 +222,8 @@ pub fn parse_apps(data: &serde_json::Value) -> Vec<App> {
             dl_a: text("downLoadUrl"),
             dl_b: text("downloadUrl"),
             is_advert: is_ad,
+            source: None,
+            desc: None,
         };
         if a.is_advert == Some(true) || a.name.trim().is_empty() {
             continue;

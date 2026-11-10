@@ -7,8 +7,11 @@ mod app;
 mod downloads;
 mod gfx;
 mod installed;
+mod library;
 mod model;
 mod net;
+mod persist;
+mod source;
 mod update;
 mod updates_ui;
 
@@ -123,9 +126,8 @@ fn main() {
         let _ = UpdateWindow(hwnd);
         // 500 ms clock: caret blink + transfer-speed sampling for the graph.
         SetTimer(Some(hwnd), app::TIMER_ID, 500, None);
-        // Remove stale partial downloads from our own temp folder (never from
-        // the user's Downloads directory).
-        updates_ui::cleanup_temp();
+        // Stale partial cleanup + task restore happen in AppState::new, where
+        // the live task keys are known (so resumable partials are preserved).
         app::start_load(hwnd.0 as usize);
 
         let mut msg = MSG::default();

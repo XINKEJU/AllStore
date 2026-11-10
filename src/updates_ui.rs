@@ -13,8 +13,7 @@ use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use crate::app::{
     AppState, BTN_H, GAP, HIT_ALL, HIT_CHECK, HIT_IGNORED_ALL, HIT_IGNORED_LIST,
     HIT_IGNORED_RESTORE, HIT_ROW, HIT_ROW_IGNORE, HIT_ROW_UPDATE, Mode, NAV_W, PAD, Payload, ROW_H,
-    STATUS_H, TOP_H, WM_APP_DL_DONE, WM_APP_DL_PROGRESS, WM_APP_STATUS, WM_APP_UPDATE_DONE,
-    WM_APP_UPDATE_PROGRESS, draw_button, in_rect, post,
+    STATUS_H, TOP_H, WM_APP_UPDATE_DONE, WM_APP_UPDATE_PROGRESS, draw_button, in_rect, post,
 };
 use crate::downloads::{DlState, Progress};
 use crate::gfx;
@@ -96,24 +95,55 @@ fn temp_dir() -> std::path::PathBuf {
     p
 }
 
-pub(crate) fn cleanup_temp() {
+/// Stable, content-derived key for a partial download. The same app+URL maps
+/// to the same file across restarts, so an interrupted transfer can resume.
+/// FNV-1a 64-bit: dependency-free and deterministic.
+pub(crate) fn part_key(name: &str, url: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in name.as_bytes().iter().chain(url.as_bytes()) {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{:016x}", h)
+}
+
+pub(crate) fn part_path(name: &str, url: &str) -> std::path::PathBuf {
+    temp_dir().join(format!(".{}.part", part_key(name, url)))
+}
+
+/// Bytes already on disk for a task, used both to seed the progress bar and
+/// to decide whether any resumable work exists after a restart.
+pub(crate) fn partial_bytes(name: &str, url: &str) -> u64 {
+    std::fs::metadata(part_path(name, url))
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+/// Remove orphaned partials. Kept for up to 7 days so a persisted task can
+/// resume even after a long gap; only stale, unreferenced files are removed.
+/// `live` holds the keys of tasks the app is currently tracking.
+pub(crate) fn cleanup_temp(live: &[String]) {
     let Ok(entries) = std::fs::read_dir(temp_dir()) else {
         return;
     };
-    let cutoff = SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0)
-        .saturating_sub(6 * 3600);
+        .unwrap_or(0);
     for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        // A partial referenced by a live task is never deleted.
+        if live.iter().any(|k| name.contains(k)) {
+            continue;
+        }
         let Ok(meta) = e.metadata() else { continue };
-        let age = meta
+        let modified = meta
             .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
-            .unwrap_or(0);
-        if age < cutoff {
+            .unwrap_or(now);
+        if now.saturating_sub(modified) > 7 * 24 * 3600 {
             let _ = std::fs::remove_file(e.path());
         }
     }
@@ -151,19 +181,22 @@ fn looks_like_package(file: &mut File, ext: &str) -> bool {
 /// it only after the size, status code and file signature all check out.
 #[cfg(test)]
 pub(crate) fn download_package(name: &str, url: &str, h: usize) -> Result<String, String> {
-    download_package_ex(name, url, h, None, None)
+    download_package_ex(name, url, h, None, None, false)
 }
 
-/// Task-aware variant. `Content-Length` is reported before the first byte and
-/// every chunk feeds a throttled progress emitter, so the UI always has a
-/// meaningful percentage — the previous code only posted once per 8 MB and
-/// therefore showed nothing at all for typical 1-3 MB installers.
+/// Task-aware, resumable variant. `resume` asks the server for bytes `[N..]`
+/// using the stable `.part` file's current length as N. If the server honours
+/// the Range (206) the partial body is appended; if it ignores the Range (200)
+/// the file is truncated and rewritten from byte 0. `Content-Length`/Range is
+/// reported before the first byte so the bar always has a whole-file
+/// denominator — typical 1-3 MB installers no longer show an empty bar.
 pub(crate) fn download_package_ex(
     name: &str,
     url: &str,
     h: usize,
     task_id: Option<u64>,
     cancel: Option<Arc<AtomicBool>>,
+    resume: bool,
 ) -> Result<String, String> {
     let safe = sanitize(name);
     let dir = match std::env::var("USERPROFILE") {
@@ -171,24 +204,48 @@ pub(crate) fn download_package_ex(
         Err(_) => ".".to_string(),
     };
     std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建下载目录：{}", e))?;
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    let tmp = temp_dir()
-        .join(format!(".{}-{}.part", safe, stamp))
-        .to_string_lossy()
-        .to_string();
-    let mut file = File::create(&tmp).map_err(|e| format!("无法创建文件：{}", e))?;
+    let tmp = part_path(name, url).to_string_lossy().to_string();
+    // Existing bytes are the resume offset. A brand-new download starts at 0.
+    let existing = if resume { partial_bytes(name, url) } else { 0 };
+
+    // OpenOptions lets us append on resume and seek/truncate when a server
+    // ignores Range. `File::create` would silently discard the partial.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .read(true)
+        .create(true)
+        .truncate(existing == 0)
+        .open(&tmp)
+        .map_err(|e| format!("无法创建文件：{}", e))?;
+    if existing > 0 {
+        use std::io::Seek;
+        let _ = file.seek(std::io::SeekFrom::End(0));
+    }
+
     let mut total = 0usize;
     let mut write_error: Option<String> = None;
-    let mut progress = Progress::new(task_id, h, name);
-    // The header callback and the body sink both run on this thread; a Cell
-    // hands Content-Length from one closure to the other without aliasing.
+    // Both the header (`meta`) and body (`sink`) callbacks touch progress, so
+    // share it through a RefCell rather than two competing &mut borrows.
+    let progress = std::cell::RefCell::new(Progress::new(task_id, h, name));
+    if existing > 0 {
+        progress.borrow_mut().set_done(existing);
+    }
+    // Set by the header callback, consumed before the first body byte: if the
+    // server returned 200 for a Range request it must be overwritten from 0.
+    let need_reset = Cell::new(false);
     let total_hint = Cell::new(0u64);
+    let started = Cell::new(false);
 
     let fetch = {
-        let mut meta = |size: u64| total_hint.set(size);
+        let mut meta = |size: u64, partial: bool| {
+            total_hint.set(size);
+            if existing > 0 && !partial {
+                need_reset.set(true);
+            }
+            if size > 0 {
+                progress.borrow_mut().set_total(size);
+            }
+        };
         let mut sink = |chunk: &[u8]| -> bool {
             if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
                 return false;
@@ -196,26 +253,47 @@ pub(crate) fn download_package_ex(
             if write_error.is_some() {
                 return false;
             }
+            if !started.replace(true) && need_reset.get() {
+                use std::io::Seek;
+                if let Err(e) = file
+                    .set_len(0)
+                    .and_then(|_| file.seek(std::io::SeekFrom::Start(0)))
+                {
+                    write_error = Some(e.to_string());
+                    return false;
+                }
+                total = 0;
+                progress.borrow_mut().set_done(0);
+            }
             if let Err(e) = file.write_all(chunk) {
                 write_error = Some(e.to_string());
                 return false;
             }
             total += chunk.len();
-            if progress.total() == 0 && total_hint.get() > 0 {
-                progress.set_total(total_hint.get());
+            let mut pg = progress.borrow_mut();
+            if pg.total() == 0 && total_hint.get() > 0 {
+                pg.set_total(total_hint.get());
             }
-            progress.written(chunk.len());
-            progress.add(chunk.len());
+            pg.written(chunk.len());
+            pg.add(chunk.len());
+            drop(pg);
             true
         };
-        net::fetch_binary_stream(url, &mut sink, &mut meta)
+        net::fetch_binary_stream_resume(url, existing, &mut sink, &mut meta)
     };
     let _ = file.flush();
     drop(file);
 
     let outcome = finalize(&fetch, total, write_error, &tmp, &dir, &safe, name);
-    if outcome.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    if let Err(e) = &outcome {
+        // Keep the partial on a cancellation or transport error so the next
+        // "继续" can resume from these bytes. Discard it only when the bytes
+        // themselves are invalid (signature/size mismatch), which would make
+        // every later resume fail on the same corrupt tail.
+        let recoverable = e.contains("中止") || e.contains("失败：") || e.contains("HTTP");
+        if !recoverable {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
     outcome
 }
@@ -251,9 +329,11 @@ fn finalize(
     let path = unique_path(dir, safe, &ext);
     persist(tmp, &path)?;
     net::log(&format!(
-        "DOWNLOAD ok name={} bytes={} ext={} host={}",
+        "DOWNLOAD ok name={} bytes={} whole={} resumed={} ext={} host={}",
         name,
         total,
+        meta.total,
+        meta.resumed,
         ext,
         meta.final_url.split('/').nth(2).unwrap_or("?")
     ));
@@ -755,7 +835,8 @@ impl AppState {
                 // and download centre) so a finished update offers "安装".
                 let task_state = self.task_for(&u.name).map(|t| t.state);
                 let (action, prominent) = match task_state {
-                    Some(DlState::Downloading | DlState::Queued) => ("取消", false),
+                    Some(DlState::Downloading | DlState::Queued) => ("暂停", false),
+                    Some(DlState::Paused) => ("继续", true),
                     Some(DlState::Done) => ("安装", true),
                     Some(DlState::Failed | DlState::Canceled) => ("重试", true),
                     None => ("更新", true),
@@ -799,7 +880,8 @@ impl AppState {
         };
         let existing = self.task_for(&u.name).map(|t| (t.id, t.state));
         match existing {
-            Some((id, DlState::Downloading | DlState::Queued)) => self.cancel_task(id),
+            Some((id, DlState::Downloading | DlState::Queued)) => self.pause_task(id),
+            Some((id, DlState::Paused)) => self.resume_task(id),
             Some((id, DlState::Failed | DlState::Canceled)) => self.retry_task(id),
             Some((id, DlState::Done)) => self.install_task(id),
             None => self.start_update_download(i),
@@ -815,74 +897,27 @@ impl AppState {
         if items.is_empty() {
             return;
         }
-        let h = self.hwnd_usize();
-        let mut jobs: Vec<(u64, String, String, Arc<AtomicBool>)> = Vec::new();
+        let mut ids: Vec<u64> = Vec::new();
         for (name, url, logo) in items {
             let id = self.new_download(&name, &url, logo);
-            if jobs.iter().any(|j| j.0 == id) {
+            if ids.contains(&id) {
                 continue;
             }
-            let cancel = self
-                .downloads
-                .iter()
-                .find(|t| t.id == id)
-                .map(|t| t.cancel.clone())
-                .unwrap_or_default();
-            jobs.push((id, name, url, cancel));
+            ids.push(id);
         }
-        let ids: Vec<u64> = jobs.iter().map(|j| j.0).collect();
-        self.mark_running(&ids);
-        let n = jobs.len();
-        self.status = format!("已加入下载队列：{} 个更新包（可在下载管理查看进度）", n);
+        let n = ids.len();
+        // Every package becomes a normal queued task, so the shared scheduler
+        // runs them (up to three at a time) with the same pause / retry /
+        // resume behaviour as a single download.
+        for id in &ids {
+            self.start_task(*id);
+        }
+        self.status = format!(
+            "已加入下载队列：{} 个更新包  ·  最多 {} 个并行",
+            n,
+            crate::downloads::MAX_CONCURRENT
+        );
         self.invalidate();
-        // Still serial: one connection at a time, but each package now has a
-        // full task entry with its own live progress in the download centre.
-        std::thread::spawn(move || {
-            let mut ok = 0usize;
-            let mut failures: Vec<String> = Vec::new();
-            for (i, (id, name, url, cancel)) in jobs.into_iter().enumerate() {
-                post(
-                    h,
-                    WM_APP_STATUS,
-                    Payload::Status(format!("({}/{}) 正在下载 {} …", i + 1, n, name)),
-                );
-                post(
-                    h,
-                    WM_APP_DL_PROGRESS,
-                    Payload::DlProgress {
-                        id,
-                        done: 0,
-                        total: 0,
-                        speed: 0.0,
-                        disk: 0.0,
-                    },
-                );
-                let result = download_package_ex(&name, &url, h, Some(id), Some(cancel));
-                match &result {
-                    Ok(_) => ok += 1,
-                    Err(e) => {
-                        net::log(&format!("UPDATE FAIL {} {}", name, e));
-                        failures.push(format!("{}：{}", name, e));
-                    }
-                }
-                post(h, WM_APP_DL_DONE, Payload::DlDone { id, result });
-            }
-            let msg = if failures.is_empty() {
-                format!(
-                    "已完成 {}/{} 个更新包，请在下载管理或 Downloads 中运行安装程序",
-                    ok, n
-                )
-            } else {
-                format!(
-                    "已完成 {}/{}，失败 {} 个 — {}",
-                    ok,
-                    n,
-                    failures.len(),
-                    failures.join("；").chars().take(160).collect::<String>()
-                )
-            };
-            post(h, WM_APP_STATUS, Payload::Status(msg));
-        });
     }
 
     fn ignore_update(&mut self, i: usize) {
@@ -996,7 +1031,7 @@ mod tests {
         let hint = Cell::new(0u64);
         let mut chunks = 0usize;
         let mut size_at_first_chunk = 0u64;
-        let mut meta = |n: u64| hint.set(n);
+        let mut meta = |n: u64, _partial: bool| hint.set(n);
         let mut sink = |buf: &[u8]| -> bool {
             if chunks == 0 {
                 size_at_first_chunk = hint.get();
@@ -1050,5 +1085,47 @@ mod tests {
                     .contains("download-self-test")
             });
         assert!(!leftover, "no .part/temp file should remain");
+    }
+
+    /// The whole point of 0.9.0: a partial file on disk must be continued,
+    /// not restarted. Seeds 300 KB of a real 1.19 MB installer, resumes it and
+    /// compares the result byte-for-byte with a clean download of the same URL.
+    #[test]
+    #[ignore = "requires live network and writes temporary files"]
+    fn live_resume_continues_from_partial_bytes() {
+        let url = "https://webcdn.m.qq.com/spcmgr/download/znabc-5.23-1203.exe";
+        let name = "MindosShop-resume-self-test";
+        let part = part_path(name, url);
+        let _ = std::fs::remove_file(&part);
+        let cut = 300_000u64;
+        {
+            let mut f = File::create(&part).expect("cannot seed a partial file");
+            let mut written = 0u64;
+            let mut sink = |buf: &[u8]| -> bool {
+                let take = ((cut - written) as usize).min(buf.len());
+                f.write_all(&buf[..take]).expect("seed write failed");
+                written += take as u64;
+                written < cut // stop the transfer once the seed is big enough
+            };
+            let mut meta = |_n: u64, _p: bool| {};
+            let _ = net::fetch_binary_stream(url, &mut sink, &mut meta);
+        }
+        assert_eq!(partial_bytes(name, url), cut, "seed partial is wrong size");
+
+        let resumed = download_package_ex(name, url, 0, None, None, true)
+            .expect("resume must complete the package");
+        let clean = download_package("MindosShop-resume-self-test-clean", url, 0)
+            .expect("clean download must succeed");
+
+        let a = std::fs::read(&resumed).unwrap();
+        let b = std::fs::read(&clean).unwrap();
+        println!("resumed={} bytes clean={} bytes", a.len(), b.len());
+        assert_eq!(a.len(), b.len(), "resumed file size differs");
+        assert_eq!(&a[..2], b"MZ", "resumed file lost its PE signature");
+        assert_eq!(a, b, "resumed bytes differ from a clean download");
+        assert_eq!(partial_bytes(name, url), 0, ".part must be gone");
+
+        std::fs::remove_file(&resumed).unwrap();
+        std::fs::remove_file(&clean).unwrap();
     }
 }

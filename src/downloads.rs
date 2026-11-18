@@ -1098,7 +1098,6 @@ impl AppState {
         if panel.right <= panel.left + 320.0 {
             return;
         }
-        self.gfx.shadow(panel, 14.0, 0.07);
         self.gfx.round(panel, 14.0, p.card);
         self.gfx.outline(panel, p.border, 0.8);
         let l = panel.left + 16.0;
@@ -1411,6 +1410,12 @@ impl AppState {
             return;
         }
 
+        self.gfx.push_clip(gfx::rect(
+            NAV_W,
+            DL_ROWS_TOP,
+            w,
+            self.height as f32 - STATUS_H,
+        ));
         for (i, t) in self.downloads.iter().enumerate() {
             let Some(r) = self.dl_row_rect(i) else {
                 continue;
@@ -1604,6 +1609,7 @@ impl AppState {
                 }
             }
         }
+        self.gfx.pop_clip();
     }
 
     /// Compact live progress shown in the bottom bar on every page.

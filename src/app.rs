@@ -209,6 +209,13 @@ const BRAND_ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
 const BRAND_LOGO: &str = "brand:logo";
 pub(crate) const ROW_H: f32 = 84.0;
 pub(crate) const HERO_H: f32 = 88.0;
+/// Top edge of the scrolling list on the browse page. The banner above it is
+/// fixed, so the list gets its own clip: without one, cards rode up over the
+/// banner and were then dropped whole the moment their bottom edge crossed it,
+/// which is what made scrolling look like it jumped in steps. The value sits a
+/// few DIPs below the banner's bottom edge (TOP_H + 14 + HERO_H) so a clipped
+/// card can never peek through the banner's rounded corners.
+pub(crate) const LIST_TOP: f32 = TOP_H + HERO_H + 18.0;
 pub(crate) const MIN_W: i32 = 1000;
 pub(crate) const MIN_H: i32 = 620;
 
@@ -1148,6 +1155,20 @@ impl AppState {
         source_chips(w, &self.sources, &self.source_counts)
     }
 
+    /// Repaint before returning to the message loop.
+    ///
+    /// `InvalidateRect` only queues a paint, and WM_PAINT is the lowest
+    /// priority message there is: while the wheel is spinning the queue never
+    /// drains, so several notches collapse into one paint and the list moves in
+    /// lumps. Painting inline keeps every notch on its own frame.
+    fn paint_now(&self) {
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), None, false);
+            // A zero-sized update rect means "everything that is invalid".
+            let _ = UpdateWindow(self.hwnd);
+        }
+    }
+
     pub(crate) fn invalidate(&self) {
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
@@ -1282,12 +1303,29 @@ impl AppState {
         self.scroll_frac
     }
 
-    /// Queue a wheel/keyboard scroll. The actual position is advanced by the
-    /// animation clock, keeping hit testing and painting on one value.
+    /// Queue a jump that is large enough to deserve a glide (keyboard paging,
+    /// Home/End). Small wheel deltas go through `scroll_by` instead.
     fn scroll_to(&mut self, target: i32) {
         let max = self.max_scroll();
         self.scroll_target = (target as f32).clamp(0.0, max as f32);
         self.start_anim();
+    }
+
+    /// Wheel scrolling moved 1:1 with the pointer.
+    ///
+    /// An eased follow was measured at ~350 ms to settle: the last 10 DIP
+    /// alone took 200 ms of imperceptible creep, so a fast wheel read as the
+    /// list stopping and then jumping again per notch. Nothing is queued here
+    /// — the next painted frame is already at the new offset, which is what
+    /// "follows the hand" means. Sub-DIP deltas are kept, not rounded, so a
+    /// precision touchpad's small deltas accumulate into real motion instead
+    /// of collapsing to zero and then jumping a whole notch at once.
+    fn scroll_by(&mut self, delta: f32) {
+        let max = self.max_scroll() as f32;
+        let v = (self.scroll_frac + delta).clamp(0.0, max);
+        self.scroll_frac = v;
+        self.scroll_target = v;
+        self.scroll = v.round() as i32;
     }
 
     /// Retarget the selection pill; called whenever the active row changes.
@@ -1642,7 +1680,7 @@ impl AppState {
         let x = NAV_W + PAD + col as f32 * (cw + GAP);
         let y = TOP_H + HERO_H + 28.0 + row as f32 * (CARD_H + GAP) - self.scroll_px();
         let h = self.height as f32;
-        if y + CARD_H < TOP_H + HERO_H + 16.0 || y > h - STATUS_H {
+        if y + CARD_H < LIST_TOP || y > h - STATUS_H {
             return None;
         }
         Some((x, y, x + cw, y + CARD_H))
@@ -2352,7 +2390,7 @@ impl AppState {
         );
     }
 
-    fn render_browse(&mut self, w: f32, _h: f32) {
+    fn render_browse(&mut self, w: f32, h: f32) {
         let p = self.gfx.pal;
         let title = if self.loading {
             "正在连接应用目录…".to_string()
@@ -2364,8 +2402,6 @@ impl AppState {
         // the download centre so progress is never more than one click away.
         let hero = gfx::rect(NAV_W + PAD, TOP_H + 14.0, w - PAD, TOP_H + 14.0 + HERO_H);
         if hero.right > hero.left + 200.0 {
-            let dark = self.gfx.is_dark();
-            self.gfx.shadow(hero, 16.0, if dark { 0.30 } else { 0.09 });
             self.gfx.vgradient(
                 hero,
                 16.0,
@@ -2496,12 +2532,21 @@ impl AppState {
             local_states[i] = self.inventory.status(&a.name, a.version.as_deref());
         }
 
+        // The banner above the grid is fixed, so the grid is clipped to its own
+        // band. Without this a card scrolled up *over* the banner and was then
+        // removed in one go as soon as its bottom edge cleared it — the list
+        // looked like it jumped a whole card at a time instead of sliding.
+        self.gfx
+            .push_clip(gfx::rect(NAV_W, LIST_TOP, w, h - STATUS_H));
+
         for (i, a) in self.apps.iter().enumerate().take(hi).skip(lo) {
             let Some(card) = self.card_rect(i) else {
                 continue;
             };
-            // Hovering the card or its action both lift the whole tile: motion
-            // plus a stronger shadow, the way every current Windows store does.
+            // Hovering the card or its action both lift the whole tile, the
+            // way every current Windows store does. Depth comes from the lift
+            // and the accent tint — no shadow: the old three-band fake was
+            // what kept reading as a grey rectangle behind every card.
             let hov = self
                 .hover_amt(HIT_CARD, i)
                 .max(self.hover_amt(HIT_INSTALL, i));
@@ -2514,12 +2559,6 @@ impl AppState {
             let (x0, y0, x1, y1) = (card.0, card.1 - lift, card.2, card.3 - lift);
             let card = (x0, y0, x1, y1);
             let r = gfx::rect(x0, y0, x1, y1);
-            let dark = self.gfx.is_dark();
-            self.gfx.shadow(
-                r,
-                16.0,
-                ((if dark { 0.30 } else { 0.10 }) + 0.14 * hov) * eased,
-            );
             self.gfx.vgradient(
                 r,
                 16.0,
@@ -2670,6 +2709,7 @@ impl AppState {
                 false,
             );
         }
+        self.gfx.pop_clip();
         if self.apps.is_empty() && !self.loading {
             let card = gfx::rect(
                 NAV_W + PAD,
@@ -2723,8 +2763,6 @@ impl AppState {
 
         // Hero card: big icon, identity, metadata and one prominent action.
         let hero = gfx::rect(NAV_W + PAD, DETAIL_HERO_TOP, w - PAD, DETAIL_HERO_BOTTOM);
-        self.gfx
-            .shadow(hero, 18.0, if self.gfx.is_dark() { 0.30 } else { 0.09 });
         self.gfx.vgradient(
             hero,
             18.0,
@@ -3038,17 +3076,23 @@ impl AppState {
                         return Some((HIT_SOURCE, i));
                     }
                 }
-                for i in 0..self.apps.len() {
-                    if let Some(c) = self.card_rect(i)
-                        && x >= c.0
-                        && x <= c.2
-                        && y >= c.1
-                        && y <= c.3
-                    {
-                        if in_rect(x, y, Self::install_rect(c)) {
-                            return Some((HIT_INSTALL, i));
+                // Only rows inside the list band can be hit: the banner owns
+                // everything above it, so a card scrolled under the banner must
+                // not steal a click meant for the banner's chips.
+                if y >= LIST_TOP {
+                    let (lo, hi) = self.visible_card_range(self.apps.len());
+                    for i in lo..hi {
+                        if let Some(c) = self.card_rect(i)
+                            && x >= c.0
+                            && x <= c.2
+                            && y >= c.1
+                            && y <= c.3
+                        {
+                            if in_rect(x, y, Self::install_rect(c)) {
+                                return Some((HIT_INSTALL, i));
+                            }
+                            return Some((HIT_CARD, i));
                         }
-                        return Some((HIT_CARD, i));
                     }
                 }
                 None
@@ -3325,16 +3369,17 @@ impl AppState {
                     && pt.y as f32 / s <= self.height as f32 - STATUS_H - 40.0;
                 if over_nav && self.nav_scroll_max > 0.0 {
                     let step = (delta as f32 / 120.0) * NAV_WHEEL_STEP;
-                    self.nav_scroll_target =
-                        (self.nav_scroll_target - step).clamp(0.0, self.nav_scroll_max);
-                    self.start_anim();
-                    self.invalidate();
+                    let v = (self.nav_scroll_target - step).clamp(0.0, self.nav_scroll_max);
+                    // Same contract as the content list: follow immediately.
+                    self.nav_scroll_target = v;
+                    self.nav_scroll = v;
+                    self.paint_now();
                     return Some(LRESULT(0));
                 }
-                // Rapid notches accumulate on the target instead of fighting
-                // an eased position that has not caught up yet.
-                let target = self.scroll_target - (delta / 3) as f32;
-                self.scroll_to(target.round() as i32);
+                // `delta / 3` is kept as a float and never rounded: rounding a
+                // small touchpad notch to whole DIPs threw away the movements
+                // that make the list track the finger.
+                self.scroll_by(-(delta as f32) / 3.0);
                 // Cards are only given a logo when they come into view: the
                 // initial pass covers the first screen, scrolling pulls the
                 // next batch without ever firing 850 requests at once.
@@ -3342,7 +3387,7 @@ impl AppState {
                     self.last_icon_queue = Instant::now();
                     self.queue_icons();
                 }
-                self.invalidate();
+                self.paint_now();
                 Some(LRESULT(0))
             }
             WM_CHAR => {

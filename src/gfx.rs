@@ -581,26 +581,6 @@ impl Gfx {
         }
     }
 
-    /// Soft drop shadow built from three expanding rounded rectangles. Direct2D
-    /// has no blur primitive for primitives, and a real shadow effect would
-    /// cost a layer per card; three translucent bands are indistinguishable at
-    /// this scale and stay cheap when a page holds 25 cards.
-    pub fn shadow(&self, r: D2D_RECT_F, radius: f32, alpha: f32) {
-        if alpha <= 0.0 {
-            return;
-        }
-        for i in 0..3 {
-            let e = (i as f32 + 1.0) * 2.0;
-            let dy = (i as f32 + 1.0) * 1.1;
-            let a = (alpha * (0.55 - i as f32 * 0.11)).max(0.0);
-            self.round(
-                rect(r.left - e, r.top - e + dy, r.right + e, r.bottom + e + dy),
-                radius + e,
-                Color(0.0, 0.0, 0.0, a),
-            );
-        }
-    }
-
     /// Offset every following primitive; paired with `reset_transform`. Used
     /// for the short slide that plays when the user changes page.
     pub fn translate(&self, x: f32, y: f32) {

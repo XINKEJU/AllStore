@@ -892,7 +892,6 @@ impl AppState {
 
         if rows.is_empty() && (!self.update_checking || viewing_ignored) {
             let card = gfx::rect(NAV_W + PAD, TOP_H + 108.0, w - PAD, TOP_H + 224.0);
-            self.gfx.shadow(card, 16.0, 0.08);
             self.gfx.vgradient(
                 card,
                 16.0,
@@ -935,6 +934,12 @@ impl AppState {
             return;
         }
 
+        self.gfx.push_clip(gfx::rect(
+            NAV_W,
+            TOP_H + 72.0,
+            w,
+            self.height as f32 - STATUS_H,
+        ));
         for (i, u) in rows.iter().enumerate() {
             let Some(r) = self.row_rect(i) else {
                 continue;
@@ -1031,6 +1036,7 @@ impl AppState {
                 );
             }
         }
+        self.gfx.pop_clip();
     }
 
     fn start_update_download(&mut self, i: usize) {

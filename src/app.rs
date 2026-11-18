@@ -574,10 +574,10 @@ pub(crate) fn draw_button(
         g.round(r, 8.0, bg);
     }
     if !primary && !disabled {
-        g.outline(r, p.border, 1.0);
+        g.outline(r, 8.0, p.border, 1.0);
     }
     if hovered && !disabled {
-        g.outline(r, if primary { p.on_accent } else { p.accent }, 1.5);
+        g.outline(r, 8.0, if primary { p.on_accent } else { p.accent }, 1.5);
     }
     g.center_text(label, r, 13, true, fg);
 }
@@ -2162,6 +2162,7 @@ impl AppState {
         self.gfx.round(sr, 9.0, p.bg);
         self.gfx.outline(
             sr,
+            9.0,
             if self.focus_search {
                 p.accent
             } else {
@@ -2408,7 +2409,7 @@ impl AppState {
                 p.accent_soft.mix(p.accent, 0.18),
                 p.accent_soft.mix(p.card, 0.20),
             );
-            self.gfx.outline(hero, p.accent.with_alpha(0.20), 1.0);
+            self.gfx.outline(hero, 16.0, p.accent.with_alpha(0.20), 1.0);
             // Decorative depth rings, kept inside the card so nothing leaks
             // over the rounded corners.
             self.gfx.round(
@@ -2467,7 +2468,7 @@ impl AppState {
                 } else {
                     self.gfx.round(*r, 9.0, p.card.mix(p.bg, amt * 0.5));
                     self.gfx
-                        .outline(*r, p.border.mix(p.accent, amt), 0.8 + amt * 0.6);
+                        .outline(*r, 9.0, p.border.mix(p.accent, amt), 0.8 + amt * 0.6);
                 }
                 self.gfx.center_text(
                     &label,
@@ -2565,7 +2566,8 @@ impl AppState {
                 p.card.mix(p.accent_soft, 0.55 * hov),
                 p.card.mix(p.bg, 0.24).mix(p.accent_soft, 0.40 * hov),
             );
-            self.gfx.outline(r, p.border.mix(p.accent, hov), 0.9 + hov);
+            self.gfx
+                .outline(r, 16.0, p.border.mix(p.accent, hov), 0.9 + hov);
 
             let icon = gfx::rect(x0 + 16.0, y0 + 16.0, x0 + 80.0, y0 + 80.0);
             let key = a.logo_url().unwrap_or("");
@@ -2718,7 +2720,7 @@ impl AppState {
                 TOP_H + HERO_H + 168.0,
             );
             self.gfx.round(card, 16.0, p.accent_soft);
-            self.gfx.outline(card, p.border, 0.8);
+            self.gfx.outline(card, 16.0, p.border, 0.8);
             self.gfx.text(
                 "没有找到应用",
                 gfx::rect(
@@ -2769,7 +2771,7 @@ impl AppState {
             p.accent_soft.mix(p.accent, 0.16),
             p.accent_soft.mix(p.card, 0.20),
         );
-        self.gfx.outline(hero, p.accent.with_alpha(0.18), 1.0);
+        self.gfx.outline(hero, 18.0, p.accent.with_alpha(0.18), 1.0);
         draw_button(
             &mut self.gfx,
             p,

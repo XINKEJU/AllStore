@@ -898,7 +898,7 @@ impl AppState {
                 p.accent_soft.mix(p.accent, 0.12),
                 p.accent_soft.mix(p.card, 0.20),
             );
-            self.gfx.outline(card, p.accent.with_alpha(0.18), 0.9);
+            self.gfx.outline(card, 16.0, p.accent.with_alpha(0.18), 0.9);
             self.gfx.text(
                 if viewing_ignored {
                     "没有被忽略的应用"
@@ -953,7 +953,7 @@ impl AppState {
             self.gfx
                 .round(r, 12.0, if row_hover { p.hover } else { p.card });
             self.gfx
-                .outline(r, p.border, if row_hover { 1.2 } else { 0.8 });
+                .outline(r, 12.0, p.border, if row_hover { 1.2 } else { 0.8 });
             let icon = gfx::rect(r.left + 16.0, r.top + 16.0, r.left + 68.0, r.top + 68.0);
             let key = u.logo.as_deref().unwrap_or("");
             if !self.gfx.bitmap(key, icon) {

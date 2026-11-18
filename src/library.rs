@@ -163,7 +163,7 @@ impl AppState {
                 p.accent_soft.mix(p.accent, 0.12),
                 p.accent_soft.mix(p.card, 0.20),
             );
-            self.gfx.outline(card, p.accent.with_alpha(0.18), 0.9);
+            self.gfx.outline(card, 16.0, p.accent.with_alpha(0.18), 0.9);
             self.gfx.text(
                 "还没有可显示的软件",
                 gfx::rect(
@@ -206,7 +206,7 @@ impl AppState {
             self.gfx
                 .round(r, 12.0, if hovered { p.hover } else { p.card });
             self.gfx
-                .outline(r, p.border, if hovered { 1.2 } else { 0.8 });
+                .outline(r, 12.0, p.border, if hovered { 1.2 } else { 0.8 });
 
             let icon = gfx::rect(r.left + 16.0, r.top + 16.0, r.left + 68.0, r.top + 68.0);
             self.gfx.vgradient(

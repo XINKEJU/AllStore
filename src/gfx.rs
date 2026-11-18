@@ -515,9 +515,20 @@ impl Gfx {
         }
     }
 
-    pub fn outline(&self, r: D2D_RECT_F, c: Color, width: f32) {
+    /// Hairline border that follows the fill it belongs to. Every card in the
+    /// app is a rounded rectangle, so a square `DrawRectangle` border would
+    /// leave four little right-angle corners sticking out past the fill —
+    /// which reads as a stray frame around the card.
+    pub fn outline(&self, r: D2D_RECT_F, radius: f32, c: Color, width: f32) {
         if let Some(b) = self.brush(c) {
-            unsafe { self.rt.DrawRectangle(&r, &b, width, None) };
+            unsafe {
+                let rr = D2D1_ROUNDED_RECT {
+                    rect: r,
+                    radiusX: radius,
+                    radiusY: radius,
+                };
+                self.rt.DrawRoundedRectangle(&rr, &b, width, None);
+            }
         }
     }
 

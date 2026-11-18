@@ -1099,7 +1099,7 @@ impl AppState {
             return;
         }
         self.gfx.round(panel, 14.0, p.card);
-        self.gfx.outline(panel, p.border, 0.8);
+        self.gfx.outline(panel, 14.0, p.border, 0.8);
         let l = panel.left + 16.0;
         let r = panel.right - 16.0;
         let t = panel.top;
@@ -1424,7 +1424,7 @@ impl AppState {
             self.gfx
                 .round(r, 14.0, if hovered { p.hover } else { p.card });
             self.gfx
-                .outline(r, p.border, if hovered { 1.2 } else { 0.8 });
+                .outline(r, 14.0, p.border, if hovered { 1.2 } else { 0.8 });
 
             let icon = gfx::rect(r.left + 16.0, r.top + 22.0, r.left + 72.0, r.top + 78.0);
             let key = t.logo.as_deref().unwrap_or("");

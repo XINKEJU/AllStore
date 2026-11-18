@@ -539,7 +539,7 @@ impl AppState {
             p.sub,
         );
         self.gfx.round(l.src_card, 14.0, p.card);
-        self.gfx.outline(l.src_card, p.border, 0.8);
+        self.gfx.outline(l.src_card, 14.0, p.border, 0.8);
         for (i, row) in l.toggle_rows.iter().enumerate() {
             let name = BUILTIN[i].1;
             let on = enabled(self, name);
@@ -598,7 +598,7 @@ impl AppState {
             p.sub,
         );
         self.gfx.round(l.custom_card, 14.0, p.card);
-        self.gfx.outline(l.custom_card, p.border, 0.8);
+        self.gfx.outline(l.custom_card, 14.0, p.border, 0.8);
         self.draw_field(
             l.add_name,
             "名称",
@@ -692,7 +692,7 @@ impl AppState {
             p.sub,
         );
         self.gfx.round(l.dir_card, 14.0, p.card);
-        self.gfx.outline(l.dir_card, p.border, 0.8);
+        self.gfx.outline(l.dir_card, 14.0, p.border, 0.8);
         let dir_row = gfx::rect(
             x0,
             l.dir_card.top + CARD_PAD,
@@ -845,7 +845,7 @@ impl AppState {
             p.sub,
         );
         self.gfx.round(l.about_card, 14.0, p.card);
-        self.gfx.outline(l.about_card, p.border, 0.8);
+        self.gfx.outline(l.about_card, 14.0, p.border, 0.8);
         self.gfx.text(
             &format!("AllStore v{}", crate::selfupdate::current()),
             gfx::rect(
@@ -930,6 +930,7 @@ impl AppState {
         self.gfx.round(r, 9.0, p.card);
         self.gfx.outline(
             r,
+            9.0,
             if focused { p.accent } else { p.border },
             if focused { 1.2 } else { 0.8 },
         );

@@ -242,7 +242,7 @@ fn pe_signature_ok(head: &[u8]) -> bool {
 /// it only after the size, status code and file signature all check out.
 #[cfg(test)]
 pub(crate) fn download_package(name: &str, url: &str, h: usize) -> Result<String, String> {
-    download_package_ex(name, url, h, None, None, false)
+    download_package_ex(name, url, h, None, None, false, None)
 }
 
 /// Task-aware, resumable variant. `resume` asks the server for bytes `[N..]`
@@ -258,8 +258,8 @@ pub(crate) fn download_package_ex(
     task_id: Option<u64>,
     cancel: Option<Arc<AtomicBool>>,
     resume: bool,
+    expected_hash: Option<&str>,
 ) -> Result<String, String> {
-    let safe = sanitize(name);
     let dir = crate::source::load_settings().download_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建下载目录：{}", e))?;
     let tmp = part_path(name, url).to_string_lossy().to_string();
@@ -377,7 +377,7 @@ pub(crate) fn download_package_ex(
 
     let outcome = match space_error.into_inner() {
         Some(msg) => Err(msg),
-        None => finalize(&fetch, total, write_error, &tmp, &dir, &safe, name),
+        None => finalize(&fetch, total, write_error, &tmp, &dir, name, expected_hash),
     };
     if let Err(e) = &outcome {
         // Keep the partial on a cancellation, transport error or a full disk so
@@ -396,14 +396,32 @@ pub(crate) fn download_package_ex(
     outcome
 }
 
+/// Compare the bytes on disk with the digest advertised by the source. The
+/// caller treats this failure as permanent: the partial is deleted and no
+/// source failover is attempted, since another host would ship other bytes.
+fn verify_hash(tmp: &str, want: &str, name: &str) -> Result<(), String> {
+    let actual = crate::hash::sha256_file(std::path::Path::new(tmp))?;
+    if actual.eq_ignore_ascii_case(want) {
+        return Ok(());
+    }
+    net::log(&format!(
+        "DL hash mismatch name={} want={} got={}",
+        name, want, actual
+    ));
+    Err(format!(
+        "SHA256 校验不通过：{} 的安装包内容与来源公布的不一致，已丢弃该文件",
+        name
+    ))
+}
+
 fn finalize(
     fetch: &Result<net::Fetch, String>,
     total: usize,
     write_error: Option<String>,
     tmp: &str,
     dir: &str,
-    safe: &str,
     name: &str,
+    expected_hash: Option<&str>,
 ) -> Result<String, String> {
     if let Some(e) = write_error {
         return Err(format!("写盘失败：{}", e));
@@ -433,6 +451,13 @@ fn finalize(
             meta.total, on_disk
         ));
     }
+    // The source may publish a digest (Scoop manifests, custom JSON feeds,
+    // GitHub release assets). Comparing it here catches a truncated transfer
+    // that happens to have the right length, a CDN serving a different build
+    // and a corrupted resume. The partial is discarded on mismatch.
+    if let Some(want) = expected_hash {
+        verify_hash(tmp, want, name)?;
+    }
     // A rename is free, but a Downloads folder on another volume needs a full
     // second copy of the package.
     if volume_of(dir) != volume_of(tmp)
@@ -445,7 +470,7 @@ fn finalize(
             fmt_size(free)
         ));
     }
-    let path = unique_path(dir, safe, &ext);
+    let path = unique_path(dir, &sanitize(name), &ext);
     persist(tmp, &path)?;
     net::log(&format!(
         "DOWNLOAD ok name={} bytes={} whole={} resumed={} ext={} host={}",
@@ -508,7 +533,7 @@ impl AppState {
         self.invalidate();
     }
 
-    fn set_local_snapshot(&mut self, snap: Vec<Installed>) -> bool {
+    pub(crate) fn set_local_snapshot(&mut self, snap: Vec<Installed>) -> bool {
         self.inventory = Inventory::new(snap);
         self.last_local_scan = Instant::now();
         if self.update_catalog.is_empty() {
@@ -637,6 +662,7 @@ impl AppState {
                         size: a.size.clone(),
                         logo: a.logo_url().map(str::to_string),
                         url: a.download_url(),
+                        hash: a.hash.clone(),
                     };
                 }
                 UpdateItem {
@@ -647,6 +673,7 @@ impl AppState {
                     size: None,
                     logo: None,
                     url: String::new(),
+                    hash: None,
                 }
             })
             .collect()
@@ -1010,7 +1037,7 @@ impl AppState {
         let Some(u) = self.updates.get(i).cloned() else {
             return;
         };
-        let id = self.new_download(&u.name, &u.url, u.logo.clone());
+        let id = self.new_download(&u.name, &u.url, u.logo.clone(), u.hash.clone());
         self.start_task(id);
     }
 
@@ -1032,17 +1059,24 @@ impl AppState {
     }
 
     fn update_all(&mut self) {
-        let items: Vec<(String, String, Option<String>)> = self
+        let items: Vec<(String, String, Option<String>, Option<String>)> = self
             .updates
             .iter()
-            .map(|u| (u.name.clone(), u.url.clone(), u.logo.clone()))
+            .map(|u| {
+                (
+                    u.name.clone(),
+                    u.url.clone(),
+                    u.logo.clone(),
+                    u.hash.clone(),
+                )
+            })
             .collect();
         if items.is_empty() {
             return;
         }
         let mut ids: Vec<u64> = Vec::new();
-        for (name, url, logo) in items {
-            let id = self.new_download(&name, &url, logo);
+        for (name, url, logo, hash) in items {
+            let id = self.new_download(&name, &url, logo, hash);
             if ids.contains(&id) {
                 continue;
             }
@@ -1282,7 +1316,7 @@ mod tests {
         }
         assert_eq!(partial_bytes(name, url), cut, "seed partial is wrong size");
 
-        let resumed = download_package_ex(name, url, 0, None, None, true)
+        let resumed = download_package_ex(name, url, 0, None, None, true, None)
             .expect("resume must complete the package");
         let clean = download_package("AllStore-resume-self-test-clean", url, 0)
             .expect("clean download must succeed");
@@ -1297,5 +1331,32 @@ mod tests {
 
         std::fs::remove_file(&resumed).unwrap();
         std::fs::remove_file(&clean).unwrap();
+    }
+
+    #[test]
+    fn digest_verification_accepts_match_and_rejects_tampering() {
+        let path = std::env::temp_dir().join(format!(
+            "allstore-verify-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"MZ installer bytes").unwrap();
+        let good = crate::hash::sha256_file(&path).unwrap();
+        assert!(verify_hash(&path.to_string_lossy(), &good, "工具").is_ok());
+        assert!(verify_hash(&path.to_string_lossy(), &good.to_ascii_uppercase(), "工具").is_ok());
+
+        std::fs::write(&path, b"MZ tampered bytes!!").unwrap();
+        let err = verify_hash(&path.to_string_lossy(), &good, "工具").unwrap_err();
+        let _ = std::fs::remove_file(&path);
+        assert!(err.contains("SHA256"), "unexpected error: {err}");
+        assert!(crate::hash::is_mismatch(&err));
+        assert!(!crate::downloads::link_retryable(
+            false,
+            "https://cdn/x.exe",
+            &err
+        ));
     }
 }

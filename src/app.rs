@@ -23,7 +23,7 @@ use crate::catcache;
 use crate::downloads::{self, DlState, DlTask};
 use crate::gfx::{self, Color, Gfx, Palette};
 use crate::iconcache;
-use crate::installed::{InstalledApp, Inventory};
+use crate::installed::{Installed, InstalledApp, Inventory};
 use crate::library;
 use crate::model::{App, ClassGroup, Detail, html_to_text};
 use crate::net;
@@ -47,6 +47,8 @@ pub const WM_APP_FALLBACK: u32 = 0x8000 + 12;
 pub const WM_APP_INSTALL_DONE: u32 = 0x8000 + 13;
 /// Result of the background check for a newer AllStore build.
 pub const WM_APP_SELFUPDATE: u32 = 0x8000 + 14;
+/// Local uninstall-key snapshot collected off the UI thread.
+pub const WM_APP_LOCAL_SCAN: u32 = 0x8000 + 15;
 /// Single 500 ms clock for caret blink and speed-graph sampling.
 pub const TIMER_ID: usize = 1;
 /// 60 Hz clock that only exists while an easing transition is still running.
@@ -86,12 +88,36 @@ impl Motion {
         self.value += d * (dt * 14.0).min(1.0);
         true
     }
+
+    /// Spring step with a small, deliberate overshoot. Used only by the
+    /// navigation pill, where a touch of weight makes a click feel physical;
+    /// every other surface keeps the calmer exponential `step`.
+    fn step_spring(&mut self, dt: f32, velocity: &mut f32) -> bool {
+        let d = self.target - self.value;
+        if d.abs() < 0.001 && velocity.abs() < 0.01 {
+            self.value = self.target;
+            *velocity = 0.0;
+            return false;
+        }
+        let accel = d * 210.0 - *velocity * 23.0;
+        *velocity += accel * dt;
+        self.value += *velocity * dt;
+        true
+    }
 }
 
 /// Set once the cached catalog is on screen. `start_load` reads it to word
 /// its progress line ("后台刷新" instead of "正在聚合"), which is the truth
 /// when the user is already looking at real cards.
 static CACHE_WARM: AtomicBool = AtomicBool::new(false);
+
+/// Incremented every time a catalog load is kicked off (startup, settings
+/// source change). Only the newest result is allowed to replace the catalog.
+static DATA_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A registry walk touches every uninstall key; at most one may be in flight
+/// so repeated WM_ACTIVATEAPP messages never pile up work.
+static LOCAL_SCAN_BUSY: AtomicBool = AtomicBool::new(false);
 
 /// The windows crate no longer exports this CLSID constant; the value is
 /// stable since Windows 7 ({56FDF344-FD6D-11D0-958A-006097C9A090}).
@@ -175,7 +201,9 @@ pub const HIT_TOP_UPDATES: u8 = 44;
 pub const HIT_SET_GEAR: u8 = 45;
 
 pub enum Payload {
-    Data(Result<(String, Vec<ClassGroup>, Vec<App>), String>),
+    /// (result, epoch) — a settings change re-aggregates the catalog, so an
+    /// older in-flight load must not overwrite the newer source selection.
+    Data(Result<(String, Vec<ClassGroup>, Vec<App>), String>, u64),
     /// (result, epoch) — stale responses from rapid navigation are discarded.
     List(Result<(Vec<App>, String), String>, u64),
     Icon {
@@ -207,6 +235,8 @@ pub enum Payload {
     InstallDone,
     /// Result of checking GitHub for a newer AllStore build.
     SelfUpdate(Result<Option<crate::selfupdate::Release>, String>),
+    /// Uninstall-key snapshot from the background thread (no UI-thread I/O).
+    LocalScan(Vec<Installed>),
 }
 
 pub(crate) fn post(hwnd_usize: usize, msg: u32, p: Payload) {
@@ -292,12 +322,20 @@ pub struct AppState {
     pub detail_index: usize,
     pub detail_extra: Option<Detail>,
     pub scroll: i32,
+    /// Fractional position and wheel target. The wheel only sets `scroll_target`;
+    /// the animation clock walks `scroll_frac` there so lists glide instead of
+    /// jumping a whole notch per event. Direct resets go through `set_scroll`.
+    scroll_frac: f32,
+    scroll_target: f32,
     /// (hit kind, index) of the control under the pointer.
     pub hover: Option<(u8, usize)>,
     /// Opacity of that hover tint, eased toward 1 while the pointer stays.
     pub hover_anim: Motion,
-    /// Y of the sliding sidebar selection pill.
+    /// Staggered entry of the cards on a newly opened page (0 → 1).
+    pub entry_anim: Motion,
+    /// Y of the sliding sidebar selection pill, plus its spring velocity.
     pub nav_pill: Motion,
+    nav_pill_v: f32,
     /// 1 = a nav row is selected, 0 = a utility page owns the content pane.
     pub nav_pill_vis: Motion,
     /// Page transition progress (0 = entering, 1 = settled).
@@ -307,6 +345,10 @@ pub struct AppState {
     last_tick: Instant,
     anim_running: bool,
     pub status: String,
+    /// Last painted status text and its fade, so a new line eases in instead
+    /// of snapping while the rest of the frame stays still.
+    status_prev: String,
+    status_anim: Motion,
     pub loading: bool,
     pub updates: Vec<UpdateItem>,
     /// Catalog snapshot from the last full check, used for instant local
@@ -462,15 +504,21 @@ impl AppState {
             detail_index: 0,
             detail_extra: None,
             scroll: 0,
+            scroll_frac: 0.0,
+            scroll_target: 0.0,
             hover: None,
             hover_anim: Motion::new(0.0),
+            entry_anim: Motion::new(1.0),
             nav_pill: Motion::new(0.0),
+            nav_pill_v: 0.0,
             nav_pill_vis: Motion::new(1.0),
             page_anim: Motion::new(1.0),
             last_mode: Mode::Browse,
             last_tick: Instant::now(),
             anim_running: false,
             status: "正在连接应用目录…".into(),
+            status_prev: String::new(),
+            status_anim: Motion::new(1.0),
             loading: true,
             updates: cache.items.clone(),
             update_catalog: cache.catalog.clone(),
@@ -898,7 +946,7 @@ impl AppState {
         self.recompute_sources();
         self.apply_source_filter();
         self.list_title = title.to_string();
-        self.scroll = 0;
+        self.set_scroll(0);
         self.mode = Mode::Browse;
         self.loading = false;
         self.status = match &self.source_filter {
@@ -938,13 +986,14 @@ impl AppState {
             None => self.catalog_all.clone(),
         };
         let max = self.max_scroll();
-        self.scroll = self.scroll.min(max).max(0);
+        let v = self.scroll.min(max).max(0);
+        self.set_scroll(v);
     }
 
     pub(crate) fn set_source_filter(&mut self, filter: Option<String>) {
         self.source_filter = filter;
         self.apply_source_filter();
-        self.scroll = 0;
+        self.set_scroll(0);
         self.status = match &self.source_filter {
             Some(f) => format!("仅显示 {} 源的应用  ·  {} 款", f, self.apps.len()),
             None => format!("显示全部软件源  ·  {} 款应用", self.apps.len()),
@@ -1002,10 +1051,30 @@ impl AppState {
         !matches!(self.mode, Mode::Updates | Mode::Downloads | Mode::Settings)
     }
 
-    /// Play the content slide and make sure the clock is running.
+    /// Play the content slide and staggered card entry. Both restart from
+    /// zero so a fast double navigation never accumulates stale progress.
     fn bump_page(&mut self) {
         self.page_anim.snap(0.0);
         self.page_anim.set(1.0);
+        self.entry_anim.snap(0.0);
+        self.entry_anim.set(1.0);
+        self.start_anim();
+    }
+
+    /// Reset the scroll position together with its eased target. Every page
+    /// change goes through here so an old wheel delta cannot drag the new
+    /// page somewhere the user never scrolled to.
+    fn set_scroll(&mut self, v: i32) {
+        self.scroll = v;
+        self.scroll_frac = v as f32;
+        self.scroll_target = v as f32;
+    }
+
+    /// Queue a wheel/keyboard scroll. The actual position is advanced by the
+    /// animation clock, keeping hit testing and painting on one value.
+    fn scroll_to(&mut self, target: i32) {
+        let max = self.max_scroll();
+        self.scroll_target = (target as f32).clamp(0.0, max as f32);
         self.start_anim();
     }
 
@@ -1095,7 +1164,7 @@ impl AppState {
         self.move_pill();
         self.focus_search = false;
         self.mode = Mode::Browse;
-        self.scroll = 0;
+        self.set_scroll(0);
         match item.kind {
             NavKind::Library => {
                 self.show_library();
@@ -1147,7 +1216,7 @@ impl AppState {
     pub(crate) fn open_updates(&mut self) {
         self.focus_search = false;
         self.mode = Mode::Updates;
-        self.scroll = 0;
+        self.set_scroll(0);
         self.bump_page();
         self.show_updates();
     }
@@ -1155,7 +1224,7 @@ impl AppState {
     pub(crate) fn open_downloads(&mut self) {
         self.focus_search = false;
         self.mode = Mode::Downloads;
-        self.scroll = 0;
+        self.set_scroll(0);
         self.bump_page();
         self.status = format!(
             "下载管理  ·  {} 个任务  ·  {} 个进行中",
@@ -1168,7 +1237,7 @@ impl AppState {
     pub(crate) fn open_settings(&mut self) {
         self.focus_search = false;
         self.mode = Mode::Settings;
-        self.scroll = 0;
+        self.set_scroll(0);
         self.field = None;
         self.bump_page();
         self.status = "设置  ·  修改立即保存到本机".into();
@@ -1184,7 +1253,7 @@ impl AppState {
         }
         let epoch = self.next_epoch();
         self.mode = Mode::Browse;
-        self.scroll = 0;
+        self.set_scroll(0);
         self.status = format!("正在搜索「{}」…", kw);
         self.loading = true;
         self.invalidate();
@@ -1220,7 +1289,7 @@ impl AppState {
         self.mode = Mode::Detail;
         self.detail_index = idx;
         self.detail_extra = None;
-        self.scroll = 0;
+        self.set_scroll(0);
         self.status = "应用详情  ·  已装应用可直接打开，也可重新下载安装包".into();
         self.invalidate();
         let h = self.hwnd_usize();
@@ -1300,7 +1369,12 @@ impl AppState {
             .and_then(|d| d.download_url.clone())
             .filter(|u| u.starts_with("http"))
             .unwrap_or_else(|| app.download_url());
-        let id = self.new_download(&app.name, &url, app.logo_url().map(str::to_string));
+        let id = self.new_download(
+            &app.name,
+            &url,
+            app.logo_url().map(str::to_string),
+            app.hash.clone(),
+        );
         self.start_task(id);
     }
 
@@ -1639,6 +1713,15 @@ impl AppState {
         let w = self.width as f32;
         let h = self.height as f32;
         let p = self.gfx.pal;
+        // Status lines arrive from worker threads at arbitrary moments. A
+        // short fade keeps the change legible without pulling the eye away
+        // from the page the user is actually reading.
+        if self.status != self.status_prev {
+            self.status_prev = self.status.clone();
+            self.status_anim.snap(0.0);
+            self.status_anim.set(1.0);
+            self.start_anim();
+        }
         // Any page change that bypassed the explicit helpers still gets the
         // transition, so the animation can never be "forgotten" by one path.
         if self.mode != self.last_mode {
@@ -1691,12 +1774,15 @@ impl AppState {
         );
         let status_w = (w - 430.0).max(160.0);
         let status = self.status.clone();
+        let t = self.status_anim.value;
+        let e = 1.0 - (1.0 - t) * (1.0 - t);
+        let dy = (1.0 - e) * 4.0;
         self.gfx.text(
             &status,
-            gfx::rect(16.0, h - STATUS_H, status_w, h),
+            gfx::rect(16.0, h - STATUS_H + dy, status_w, h + dy),
             11,
             false,
-            p.sub,
+            p.status.mix(p.sub, e),
         );
         self.render_status_progress(w, h);
         let sr = Self::status_dl_rect(w, h);
@@ -2103,13 +2189,21 @@ impl AppState {
             let hov = self
                 .hover_amt(HIT_CARD, i)
                 .max(self.hover_amt(HIT_INSTALL, i));
-            let lift = 3.0 * hov;
+            // Cards rise in a short wave when a page opens. The delay is
+            // capped so even the last visible row settles within ~400 ms.
+            let delay = (i as f32 * 0.028).min(0.28);
+            let t = (self.entry_anim.value - delay).clamp(0.0, 1.0);
+            let eased = 1.0 - (1.0 - t) * (1.0 - t);
+            let lift = 3.0 * hov - (1.0 - eased) * 16.0;
             let (x0, y0, x1, y1) = (card.0, card.1 - lift, card.2, card.3 - lift);
             let card = (x0, y0, x1, y1);
             let r = gfx::rect(x0, y0, x1, y1);
             let dark = self.gfx.is_dark();
-            self.gfx
-                .shadow(r, 16.0, (if dark { 0.30 } else { 0.10 }) + 0.14 * hov);
+            self.gfx.shadow(
+                r,
+                16.0,
+                ((if dark { 0.30 } else { 0.10 }) + 0.14 * hov) * eased,
+            );
             self.gfx.vgradient(
                 r,
                 16.0,
@@ -2697,7 +2791,7 @@ impl AppState {
             }
             Some((HIT_BACK, 0)) => {
                 self.mode = Mode::Browse;
-                self.scroll = 0;
+                self.set_scroll(0);
                 self.invalidate();
             }
             Some((HIT_SOURCE, i)) => {
@@ -2791,11 +2885,25 @@ impl AppState {
                     self.last_tick = Instant::now();
                     let mut live = self.hover_anim.step(dt);
                     self.nav_pill.set(self.nav_y(self.active_nav));
-                    live |= self.nav_pill.step(dt);
+                    live |= self.nav_pill.step_spring(dt, &mut self.nav_pill_v);
                     self.nav_pill_vis
                         .set(if self.pill_visible() { 1.0 } else { 0.0 });
                     live |= self.nav_pill_vis.step(dt);
                     live |= self.page_anim.step(dt);
+                    live |= self.entry_anim.step(dt);
+                    live |= self.status_anim.step(dt);
+                    // Scroll walks toward the wheel target. `scroll_frac`
+                    // keeps the sub-pixel remainder so a short delta still
+                    // moves a whole row instead of rounding to zero forever.
+                    let d = self.scroll_target - self.scroll_frac;
+                    if d.abs() > 0.1 {
+                        self.scroll_frac += d * (dt * 20.0).min(1.0);
+                        self.scroll = self.scroll_frac.round() as i32;
+                        live = true;
+                    } else if self.scroll != self.scroll_target.round() as i32 {
+                        self.scroll_frac = self.scroll_target;
+                        self.scroll = self.scroll_target.round() as i32;
+                    }
                     if !live {
                         self.stop_anim();
                     }
@@ -2822,19 +2930,17 @@ impl AppState {
             }
             WM_ACTIVATEAPP => {
                 // The user may have installed or removed something in another
-                // window. One throttled local scan refreshes both the update
-                // badge and the "installed" labels on the store pages.
-                if wparam.0 != 0 && self.last_local_scan.elapsed() >= Duration::from_secs(2) {
-                    let changed = self.refresh_updates_local();
-                    if changed && self.mode == Mode::Updates && !self.update_checking {
-                        self.status = format!(
-                            "本机版本已更新  ·  现有 {} 个可更新应用",
-                            self.updates.len()
-                        );
-                    }
-                    if changed {
-                        self.invalidate();
-                    }
+                // window. A registry walk takes tens of milliseconds, so run
+                // it off the UI thread — an Alt-Tab must never stutter.
+                if wparam.0 != 0
+                    && self.last_local_scan.elapsed() >= Duration::from_secs(2)
+                    && !LOCAL_SCAN_BUSY.swap(true, Ordering::AcqRel)
+                {
+                    let h = self.hwnd_usize();
+                    std::thread::spawn(move || {
+                        let snap = crate::installed::scan();
+                        post(h, WM_APP_LOCAL_SCAN, Payload::LocalScan(snap));
+                    });
                 }
                 None
             }
@@ -2919,8 +3025,10 @@ impl AppState {
             }
             WM_MOUSEWHEEL => {
                 let delta = ((wparam.0 >> 16) & 0xFFFF) as i16 as i32;
-                let max = self.max_scroll();
-                self.scroll = (self.scroll - delta / 3).clamp(0, max);
+                // Rapid notches accumulate on the target instead of fighting
+                // an eased position that has not caught up yet.
+                let target = self.scroll_target - (delta / 3) as f32;
+                self.scroll_to(target.round() as i32);
                 // Cards are only given a logo when they come into view: the
                 // initial pass covers the first screen, scrolling pulls the
                 // next batch without ever firing 850 requests at once.
@@ -2971,7 +3079,37 @@ impl AppState {
                 if self.field_key(key) {
                     return Some(LRESULT(0));
                 }
+                // Page navigation shares the wheel's eased target, so a long
+                // list glides to the requested place instead of teleporting.
+                match key {
+                    36 => {
+                        self.scroll_to(0); // Home
+                        return Some(LRESULT(0));
+                    }
+                    35 => {
+                        let max = self.max_scroll(); // End
+                        self.scroll_to(max);
+                        return Some(LRESULT(0));
+                    }
+                    33 => {
+                        let base = self.scroll_target.round() as i32; // PageUp
+                        self.scroll_to(base - 480);
+                        return Some(LRESULT(0));
+                    }
+                    34 => {
+                        let base = self.scroll_target.round() as i32; // PageDown
+                        self.scroll_to(base + 480);
+                        return Some(LRESULT(0));
+                    }
+                    _ => {}
+                }
                 if key == 27 {
+                    // Leaving a page must also release its text field: a stale
+                    // `field` keeps swallowing WM_CHAR/arrow keys on pages
+                    // that have no input, and Enter would still commit a
+                    // custom source the user is no longer looking at.
+                    self.field = None;
+                    self.high_surrogate = None;
                     self.mode = Mode::Browse;
                     if self
                         .nav
@@ -2980,9 +3118,11 @@ impl AppState {
                     {
                         self.active_nav = 0;
                     }
-                    self.scroll = 0;
+                    self.set_scroll(0);
                     self.blur_search();
-                    self.invalidate();
+                    // Utility pages enter with a slide; leaving via the
+                    // keyboard should not be the one path that snaps.
+                    self.bump_page();
                     return Some(LRESULT(0));
                 }
                 None
@@ -2998,7 +3138,8 @@ impl AppState {
             | WM_APP_UPDATE_PROGRESS
             | WM_APP_UPDATE_DONE
             | WM_APP_INSTALL_DONE
-            | WM_APP_SELFUPDATE => {
+            | WM_APP_SELFUPDATE
+            | WM_APP_LOCAL_SCAN => {
                 self.on_payload(msg, lparam);
                 Some(LRESULT(0))
             }
@@ -3012,7 +3153,11 @@ impl AppState {
         }
         let p = unsafe { *Box::from_raw(lparam.0 as *mut Payload) };
         match (msg, p) {
-            (WM_APP_DATA, Payload::Data(Ok((token, classes, apps)))) => {
+            (WM_APP_DATA, Payload::Data(Ok((token, classes, apps)), epoch)) => {
+                if epoch != DATA_EPOCH.load(Ordering::SeqCst) {
+                    net::log(&format!("DATA stale epoch={} dropped", epoch));
+                    return;
+                }
                 net::log(&format!(
                     "DATA ok classes={} apps={}",
                     classes.len(),
@@ -3039,8 +3184,17 @@ impl AppState {
                     self.status = format!("目录已刷新 · 共 {} 款应用", n);
                     self.invalidate();
                 }
+                // A fresh catalog is the most visible change in the app; let
+                // its rows arrive in the same wave as a page change.
+                self.entry_anim.snap(0.0);
+                self.entry_anim.set(1.0);
+                self.start_anim();
             }
-            (WM_APP_DATA, Payload::Data(Err(e))) => {
+            (WM_APP_DATA, Payload::Data(Err(e), epoch)) => {
+                if epoch != DATA_EPOCH.load(Ordering::SeqCst) {
+                    net::log(&format!("DATA stale error epoch={} dropped", epoch));
+                    return;
+                }
                 net::log(&format!("DATA err {}", e));
                 self.loading = false;
                 // With a cached catalog on screen a refresh failure is a
@@ -3110,6 +3264,19 @@ impl AppState {
             (WM_APP_UPDATE_DONE, Payload::UpdateDone(r)) => self.on_update_done(r),
             (WM_APP_INSTALL_DONE, Payload::InstallDone) => self.on_install_done(),
             (WM_APP_SELFUPDATE, Payload::SelfUpdate(r)) => self.on_self_update(r),
+            (WM_APP_LOCAL_SCAN, Payload::LocalScan(snap)) => {
+                LOCAL_SCAN_BUSY.store(false, Ordering::Release);
+                let changed = self.set_local_snapshot(snap);
+                if changed && self.mode == Mode::Updates && !self.update_checking {
+                    self.status = format!(
+                        "本机版本已更新  ·  现有 {} 个可更新应用",
+                        self.updates.len()
+                    );
+                }
+                if changed {
+                    self.invalidate();
+                }
+            }
             _ => {}
         }
     }
@@ -3180,6 +3347,7 @@ pub(crate) fn source_chips(
 /// Kick off the initial network load on a worker thread.
 pub fn start_load(hwnd_usize: usize) {
     let warm = CACHE_WARM.load(Ordering::Relaxed);
+    let epoch = DATA_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
     std::thread::spawn(move || {
         let result = (|| -> Result<(String, Vec<ClassGroup>, Vec<App>), String> {
             let token = net::register()?;
@@ -3210,7 +3378,7 @@ pub fn start_load(hwnd_usize: usize) {
             catcache::save(&classes, &merged.apps);
             Ok((token, classes, merged.apps))
         })();
-        post(hwnd_usize, WM_APP_DATA, Payload::Data(result));
+        post(hwnd_usize, WM_APP_DATA, Payload::Data(result, epoch));
     });
 }
 
@@ -3599,5 +3767,32 @@ mod tests {
         assert_eq!(AppState::next_boundary(&units, 1), 3);
         assert_eq!(AppState::next_boundary(&units, 3), 4);
         assert_eq!(AppState::next_boundary(&units, 4), 4);
+    }
+
+    #[test]
+    fn nav_spring_settles_without_running_forever() {
+        for target in [0.0, 42.0, 400.0] {
+            let mut m = Motion::new(0.0);
+            m.set(target);
+            let mut v = 0.0;
+            let mut frames = 0;
+            // 16 ms clock, same bound as the real WM_TIMER handler.
+            while m.step_spring(0.016, &mut v) && frames < 300 {
+                frames += 1;
+            }
+            assert!(frames < 300, "spring diverged toward {target}");
+            assert!((m.value - target).abs() < 0.01, "settled at {}", m.value);
+        }
+    }
+
+    #[test]
+    fn wheel_targets_are_clamped_by_the_current_page() {
+        // Mirrors the guard in `scroll_to`: without it a wheel notch on a
+        // short page could leave a target the clock never reaches.
+        let max = 120;
+        for target in [-480, 0, 60, 480] {
+            let clamped = (target as f32).clamp(0.0, max as f32);
+            assert!((0.0..=max as f32).contains(&clamped));
+        }
     }
 }

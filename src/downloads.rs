@@ -56,7 +56,7 @@ pub(crate) fn sanitize_error(msg: &str) -> String {
 /// third-party link is worth exactly one retry, a per-request Lenovo link is
 /// not (its URL is generated fresh and would just fail again).
 pub(crate) fn link_retryable(already_failed_over: bool, url: &str, err: &str) -> bool {
-    if already_failed_over || url.contains("lenovomm.cn") {
+    if already_failed_over || url.contains("lenovomm.cn") || crate::hash::is_mismatch(err) {
         return false;
     }
     // A GitHub repository can stop publishing installers (or ship only a
@@ -129,6 +129,8 @@ pub struct DlTask {
     pub name: String,
     pub url: String,
     pub logo: Option<String>,
+    /// Expected SHA-256 from the source, when it publishes one.
+    pub hash: Option<String>,
     pub state: DlState,
     pub done: u64,
     pub total: u64,
@@ -475,14 +477,25 @@ impl AppState {
     /// Reuse an existing task instead of downloading the same app twice.
     /// A Paused task is reused too, so re-clicking "获取" on a half-downloaded
     /// app resumes it instead of creating a duplicate.
-    pub fn new_download(&mut self, name: &str, url: &str, logo: Option<String>) -> u64 {
-        if let Some(t) = self.downloads.iter().rev().find(|t| {
+    pub fn new_download(
+        &mut self,
+        name: &str,
+        url: &str,
+        logo: Option<String>,
+        hash: Option<String>,
+    ) -> u64 {
+        if let Some(t) = self.downloads.iter_mut().rev().find(|t| {
             t.name == name
                 && matches!(
                     t.state,
                     DlState::Queued | DlState::Downloading | DlState::Paused
                 )
         }) {
+            // A source may republish the same URL with a new digest. Keep the
+            // stricter value so a resumed task is still verified.
+            if hash.is_some() {
+                t.hash = hash;
+            }
             return t.id;
         }
         self.next_dl_id += 1;
@@ -492,6 +505,7 @@ impl AppState {
             name: name.to_string(),
             url: url.to_string(),
             logo,
+            hash,
             state: DlState::Queued,
             done: 0,
             total: 0,
@@ -580,7 +594,12 @@ impl AppState {
         t.disk_speed = 0.0;
         t.error = None;
         t.cancel.store(false, Ordering::Relaxed);
-        let (name, url, cancel) = (t.name.clone(), t.url.clone(), t.cancel.clone());
+        let (name, url, hash, cancel) = (
+            t.name.clone(),
+            t.url.clone(),
+            t.hash.clone(),
+            t.cancel.clone(),
+        );
         let h = self.hwnd_usize();
         self.status = if resume_from > 0 {
             format!("继续下载 {}（已保存 {}）…", name, fmt_size(resume_from))
@@ -590,18 +609,31 @@ impl AppState {
         self.save_downloads();
         self.invalidate();
         std::thread::spawn(move || {
-            // A GitHub row ships `gh:owner/repo` instead of an address: the
-            // repository's current asset only exists at download time, so the
-            // resolver runs here rather than during catalog building.
+            // `gh:owner/repo` and `ms:PRODUCTID` are promises, not addresses:
+            // the current asset only exists at download time, so resolution
+            // runs here rather than during catalog building.
             let mut url = url;
-            if url.starts_with("gh:") {
+            let mut hash = hash;
+            if url.starts_with("gh:") || url.starts_with("ms:") {
                 post(
                     h,
                     crate::app::WM_APP_STATUS,
                     Payload::Status(format!("正在解析 {} 的最新安装包…", name)),
                 );
-                match crate::source::resolve_github(&url) {
-                    Ok(real) => url = real,
+                let resolved = if url.starts_with("ms:") {
+                    crate::msstore::resolve(&url)
+                } else {
+                    crate::source::resolve_github(&url).map(|u| (u, None))
+                };
+                match resolved {
+                    Ok((real, digest)) => {
+                        url = real;
+                        // Store digests change with every version, so a feed
+                        // that pinned one must not outlive a fresh manifest.
+                        if hash.is_none() {
+                            hash = digest;
+                        }
+                    }
                     Err(e) => {
                         post(h, WM_APP_DL_DONE, Payload::DlDone { id, result: Err(e) });
                         return;
@@ -622,8 +654,15 @@ impl AppState {
                     Some(id),
                     Some(cancel.clone()),
                     already > 0,
+                    hash.as_deref(),
                 );
-                if r.is_ok() || cancel.load(Ordering::Relaxed) || attempt >= MAX_RETRIES {
+                // A content mismatch is deterministic: retrying downloads the
+                // same wrong bytes three times and floods a broken CDN.
+                if r.is_ok()
+                    || cancel.load(Ordering::Relaxed)
+                    || attempt >= MAX_RETRIES
+                    || r.as_ref().is_err_and(|e| crate::hash::is_mismatch(e))
+                {
                     break r;
                 }
                 attempt += 1;
@@ -653,6 +692,7 @@ impl AppState {
                 name: t.name.clone(),
                 url: t.url.clone(),
                 logo: t.logo.clone(),
+                hash: t.hash.clone(),
                 state: SavedState::from(t.state),
                 done: updates_ui::partial_bytes(&t.name, &t.url),
                 total: t.total,
@@ -711,6 +751,7 @@ impl AppState {
                 name: s.name,
                 url: s.url,
                 logo: s.logo,
+                hash: s.hash,
                 state,
                 done: saved_done,
                 total: if saved_done > 0 { s.total } else { 0 },
@@ -1697,6 +1738,7 @@ mod tests {
             name: "Test".into(),
             url: String::new(),
             logo: None,
+            hash: None,
             state,
             done,
             total,

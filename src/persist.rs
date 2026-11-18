@@ -19,6 +19,9 @@ pub struct TaskSnapshot {
     pub url: String,
     #[serde(default)]
     pub logo: Option<String>,
+    /// Expected SHA-256 kept so a resumed task is still verified after restart.
+    #[serde(default)]
+    pub hash: Option<String>,
     pub state: SavedState,
     /// Bytes committed to the `.part` file at the time of the last save.
     #[serde(default)]
@@ -152,6 +155,7 @@ mod tests {
             name: "7-Zip".into(),
             url: "https://example.test/a.exe".into(),
             logo: None,
+            hash: Some("a".repeat(64)),
             state: SavedState::Paused,
             done: 1_048_576,
             total: 4_194_304,
@@ -163,6 +167,7 @@ mod tests {
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].done, 1_048_576);
         assert_eq!(back[0].state, SavedState::Paused);
+        assert_eq!(back[0].hash.as_deref(), Some("a".repeat(64).as_str()));
     }
 
     #[test]

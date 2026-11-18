@@ -1,0 +1,839 @@
+{
+ "name": "微软商店（Win32）",
+ "description": "Microsoft Store 的非打包 Win32 应用；安装包与 SHA-256 在下载时从商店清单解析",
+ "apps": [
+  {
+   "name": "4K Video Downloader Plus",
+   "url": "ms:XP8LVTC3LTSFN3",
+   "category": "游戏",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxlj5LU3I9IhNlC3pcpswcOIJFG3TVK8p5Ttdn7bAUDaXZRhiUL2I9g7B6FvvME6gN.gVHkC3Sxwsl7IN0ieV6Xo-&format=source",
+   "desc": "Search, browse, and download videos – all in one app."
+  },
+  {
+   "name": "Adobe Acrobat Reader DC",
+   "url": "ms:XPDP273C0XHQH2",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxlyvkTw3vm8lDHAT6SkekwFtJyLq_TDqXnEnGnY2OpOj2HmG8gVRUuvstjzOaFjSdKWOuXCw7gfWk4zFjlDKK5Y-&format=source",
+   "desc": "The official Adobe Acrobat Reader Windows app is the world’s most trusted free PDF viewer to easily open, sign, share, and mark up PDFs. Now enhanced with AI to help you work faster."
+  },
+  {
+   "name": "Adobe Creative Cloud",
+   "url": "ms:XPDLPKWG9SW2WD",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBTIRfn4ye72ghGVGS6nE9FuhVDjj_qg9kmy7run5X37awfNSa2IXtPrpnKbAjf99t2qzreMPKTZP7tDK9Fr9lNc-&format=source",
+   "desc": "Access everything Adobe Creative Cloud has to offer, right from your desktop. From your apps to your work and more. It’s one place to get everything you need to create anything you can imagine."
+  },
+  {
+   "name": "Adobe Fresco",
+   "url": "ms:XP8C8R0ZKZR27V",
+   "category": "图片图形",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBbOHQN1unbBDkMIGlVf9V6VW8TWd9XSCpuvoIN9lHQs82SKy4cXmRFQo66xISFO65RllQyRN1JX6RppdLogIkqo-&format=source",
+   "desc": "Adobe Fresco brings together the world’s largest collection of vector and raster brushes, plus revolutionary new live brushes, to deliver a completely natural painting and drawing experience."
+  },
+  {
+   "name": "Adobe Photoshop",
+   "url": "ms:XPFD4T9N395QN6",
+   "category": "视频软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBVqgFyIt4fje4zPBjaoJSzNa9eqCz1nwbzx3pTswhSwVn11rs3eoCW5cuHS2Q2BwR_w9vP5bWbS.YST_UUcoZmU-&format=source",
+   "desc": "Photoshop is an image creation, graphic design and photo editing software developed by Adobe."
+  },
+  {
+   "name": "Apache OpenOffice",
+   "url": "ms:XP89J5462CMGJD",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxvxqfIfsGMc5cxbyBQUfyaHcZJ73fyvis20hW411FuXGbel2HKwNSIOg5hWF8xNuiArkcmMUpjp5YEglnMarfaQ-&format=source",
+   "desc": "Apache OpenOffice® is the free and open productivity suite from the Apache Software Foundation."
+  },
+  {
+   "name": "Arduino IDE 2",
+   "url": "ms:XPDDTBJ80F8PC9",
+   "category": "编程软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBR1mpxxSHRjAeQKNY.14SpGglSw9Q_T17Vj6iz5SLNOCf__D3E7g2HXS_dGjwUnSQiy8CMy2I7RwP_CyVWBj74g-&format=source",
+   "desc": "Arduino is an open-source electronics platform based on easy-to-use hardware and software. It's intended for anyone making interactive projects.\nThe new major release of the Arduino IDE is faster a..."
+  },
+  {
+   "name": "Audacity",
+   "url": "ms:XP8K0J757HHRDW",
+   "category": "图片图形",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxseQJV573Uwugf0POF9I45CYVYCXqf4xlMK0K.7Y3vRI7VnO0wFM0C.bvO9AbW.cl1LnXetDhUJrTu8oTPY1bvs-&format=source",
+   "desc": "The world's most popular audio editing and recording app."
+  },
+  {
+   "name": "Avast Free Antivirus",
+   "url": "ms:XPDNZJFNCR1B07",
+   "category": "安全防护",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxrw7KTZ6LMqBr3Xv4lqiZOCW3lkKrn1mB.Pjyf_rk8ibJ1MOU4OfTajLFtu_1nTMmWLcUmC7o8IhDQRQkcGuhcs-&format=source",
+   "desc": "Get award-winning free antivirus with AI-powered online scam protection."
+  },
+  {
+   "name": "Avast Secure Browser",
+   "url": "ms:XPFNX1QSGB40CP",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBTQqzrbMtPJoYdXKGoEOl44jol29F4N.tuhPj.U.RNZbaEqgc1MXhnMkpmcIkALoRAv.ugTWqKFrWrCF8FgzeRM-&format=source",
+   "desc": "Avast Secure Browser is a free feature-packed private browser with AdBlock and VPN designed to make secure browsing fast and easy to use. Developed by the cybersecurity experts at Avast, Avast’s pr..."
+  },
+  {
+   "name": "Battle.net",
+   "url": "ms:XPDM5VSMTKQLBJ",
+   "category": "游戏",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxjy17NeLjRXKXR31hJZPSREFWR1kUHt.Q1tynkPrCx7uU0.Lmn.3Ys.42FTi.ZjKaLtCoO33r.pzqKbtAusPNvA-&format=source",
+   "desc": "Battle.net is home to a community of players from around the globe. Millions meet here every day to adventure, explore, socialize, create, strategize, battle, and triumph together."
+  },
+  {
+   "name": "Blazer Browser",
+   "url": "ms:XP8JHR5L3DZ66W",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBXxeKdDzO7.wzBcsvbsMrVP2dgGnv0kdmHZNoFihVRwtclr5Q.ieoHhSkq.W0VrhQwpNEnfWOjPodd8t5ttCcwo-&format=source",
+   "desc": "The AI-Powered Browser for Speed, Privacy & Intelligence"
+  },
+  {
+   "name": "Brave Browser",
+   "url": "ms:XP8C9QZMS2PC1T",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBc3Lcvxbd8eZCmz27OOU4CR7rfljYbXTNv9aMPQYaOwqh6IhgFwUyYdWyU8ikT0BuP0x5YCkkJWGhVsiKnRntU8-&format=source",
+   "desc": "Brave Browser is a lightning fast, safe and private web browser that prevents you from being tracked and blocks ads by default (including YouTube ads). It only takes a minute to switch and ditch Bi..."
+  },
+  {
+   "name": "Canva",
+   "url": "ms:XP8K17RNMM8MTN",
+   "category": "图片图形",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBb8YkqrmoFjcMUJULGOJelCR90tAYHMSoZgl4SvMca1c11ZbSdWRWKmpW4bu1ZTnctmNR_L.31zj.1uNN3gpno0-&format=source",
+   "desc": "Canva is an all-in-one visual communication platform that empowers the world to design. It’s a simple way to create beautiful presentations, infographics, videos, t-shirts, websites, social media p..."
+  },
+  {
+   "name": "CapCut",
+   "url": "ms:XP9KN75RRB9NHS",
+   "category": "视频软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxtHdRB6xk71KqOPxE23.XPiSp5cRN3SykW4Z5O.kryIJHSwWs.SOICJesHIS71QYWei6fRV2MhO_9Bd21MQHYKs-&format=source",
+   "desc": "Try out CapCut desktop version!\nCapCut offers easy-to-use video and photos editing tools, free in-app fonts and effects, and powerful features like keyframe animation, smooth slow motion, chroma ke..."
+  },
+  {
+   "name": "CCleaner",
+   "url": "ms:XPFCWP0SQWXM3V",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxtZXRhtTJhmA4SO78VrykI5G9U1YtKKXhbzMDgDbrbTWb_Axy9ZmzxmrEu2UEMoMXTpSYXfyaoc4kI4mm.V8OT8-&format=source",
+   "desc": "Free PC Cleaner. Clean up, speed up, and fix your Windows PC for free. Optimize your computer with technology built on 20 years of experience with millions of users."
+  },
+  {
+   "name": "CCleaner Browser",
+   "url": "ms:XPFD0R0MNZP8KP",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBUs.Ub5sL49s2G5FT.ouZAol84X586GSJ_hD6gnVWwAMJmN6AzQ5ia2awziuVn4iLSHHYg5Xrae9I1QnFdY_xyg-&format=source",
+   "desc": "CCleaner Browser is a free feature-packed private browser with AdBlock, designed to make secure browsing fast and easy to use."
+  },
+  {
+   "name": "Cleaner One Pro",
+   "url": "ms:XP8JJ8VX6VL0Q5",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxk0XjfaSCfbxhXo03zJBWdMIusslgTUcweUgMyBg1nhgEvaht4Ny0rNyRsbzNTSfxdaTT7f1MQZaXWWgdKOgqCo-&format=source",
+   "desc": "Best PC Cleaner and security protection tool in 2026. Clean junk files, cache, temporary files, useless duplicate files, registry and optimize your PC for better performance with only a few clicks...."
+  },
+  {
+   "name": "ClickUp",
+   "url": "ms:XPFMMJNL4WBKMP",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBb9txvuZ7YZpmNoRWPLUjary11x_8C31fX97bTiKUz7Nu7DE3YnPSgFuAkvfA4zFu5P_zX8GZ3xsH_4nhLmHg_E-&format=source",
+   "desc": "The everything app for work. Now with Chat, powered by AI. One place for teams of all sizes to communicate and get work done.\n\nWhether you're an agile team doing weekly sprints or you're a marketin..."
+  },
+  {
+   "name": "Clip Studio Paint - Draw and Paint Anywhere -",
+   "url": "ms:XPDP32QDDFL4PK",
+   "category": "图片图形",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxo6.H8Llcqeoav8aomH4qr8IEegN_KVdwgeiNNrtnuxfyGiEOAcYqM0MyCU_6ZZpaH1FSfma7RqEDwOc01XbkRU-&format=source",
+   "desc": "Get up to 3 months free!¹ Used by more than 50 million people worldwide.² Users with a perpetual license need a separate plan to use the latest version.\n¹For first-time users only\n²Figures from Celsys"
+  },
+  {
+   "name": "Code::Blocks",
+   "url": "ms:XPDM24HMT29WSS",
+   "category": "编程软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxqGVNN9hxjOZj6eVAK9RPsfNxee00sZGHMGzNCVJ7yJvADkRtFot7WmQPLUVEgYCuLTCDRX62MAsjvwFwqbxRYc-&format=source",
+   "desc": "Code::Blocks is a free, open-source IDE for C, C++, and Fortran. It’s fast, extensible, and cross-platform, with smart code completion, debugging tools, and support for multiple compilers—all in a..."
+  },
+  {
+   "name": "Comet Browser",
+   "url": "ms:XPFFVLPJRVQTKM",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxgA4a7tfXNN3oz4.eugS28bMwEBZP8Cb0KrX81EQ.ILK.wEEFve7zI08Sb8vfQu7pOSwNtv9631qSiZpM8kYp4U-&format=source",
+   "desc": "Browser with agentic AI, created by Perplexity"
+  },
+  {
+   "name": "Cores - Modern Hardware Monitor",
+   "url": "ms:XP89G6WPK9V2VG",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxgDjcBXXixjLDH0UEzrlHlZ9NjGwqolRkHFEfI676sOH7TikizISLZO5sc0iWmBs_cHfGj0G.Psb_xY_VxxTrgE-&format=source",
+   "desc": "Modern hardware monitor with remote monitoring."
+  },
+  {
+   "name": "CrystalDiskInfo",
+   "url": "ms:XP8K4RGX25G3GM",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBZJg_yWExI8S5mi7RDxNN5VmxeA6SNWp2Y9s8wekb7b.HzXzavKETaiLDvkWgf78PU2AtxlxSGRYs.tOm6YWOk4-&format=source",
+   "desc": "CrystalDiskInfo is open source software for checking HDD/SSD health status."
+  },
+  {
+   "name": "CrystalDiskInfo Aoi Edition",
+   "url": "ms:XPDNKFM52KNR94",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBc1uZ5qIiBMPZOisSuw6Btht3d1mbWAVhDrh4MQsKwhROdtsCIxzABl3frnDZ0uQnWNI5IIfAwZ5loQmyvjHlCo-&format=source",
+   "desc": "CrystalDiskInfo Aoi Edition is open source software for checking HDD/SSD health status by Suisho Aoi (Cute Character)."
+  },
+  {
+   "name": "CrystalDiskInfo Shizuku Edition",
+   "url": "ms:XPFP35NT4K8RWK",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxlMtNdu8fWK5F0RHBFsZE9e5GMyEXYGeMMtLXvWP7X_G8cVv7KIclEyLvKUvREGDcSAv.7K2iIBtAbx_h1uI_dc-&format=source",
+   "desc": "CrystalDiskInfo Shizuku Edition is open source software for checking HDD/SSD health status by Suisho Shizuku (Cute Character)."
+  },
+  {
+   "name": "Cốc Cốc Browser - Adblock and Multitask",
+   "url": "ms:XP8CBX99B2ZLQ1",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBagZQgyGC2_jkTZ8nDKXM2NsTG2Nv8O67m6.ogFEZbTIZQ2wiuPVXT2Szpzeunf3vvWTm4haiIIO_m6C00CES7Q-&format=source",
+   "desc": "Cốc Cốc is a browser designed with superior ad block, security and features optimized for work and entertainment"
+  },
+  {
+   "name": "Data Digester V2",
+   "url": "ms:XPDLPF9C1JF5QH",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxsJuSg4yeJ3DHe7NC3h8v22KO6PzSow8mvhtJ4fRfX9fMEi0oww_3elqd89Thl8ARWWuaVu.Q8gl4.GMyOt3v9E-&format=source",
+   "desc": "The Data Digester software is the fully integrated solution for message digests (aka checksums) and OpenPGP signatures. The graphical user interface is easy to use, feature rich, and makes it easy..."
+  },
+  {
+   "name": "Dell SupportAssist",
+   "url": "ms:XPDCCXDN26VNBT",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBZng.ks1cOl_BTa_qex9rfwaCKaHv_UtJ.felcIOQqLX66b9wfq3i.kBuY2yOJFpF7vo84jqQzgVvGwwcaSjRh8-&format=source",
+   "desc": "Keep your Dell PC running like new with SupportAssist, the intelligent software designed exclusively for Dell laptops and desktops. Enjoy smooth performance, enhanced security, and efficient troubl..."
+  },
+  {
+   "name": "Discord",
+   "url": "ms:XPDC2RH70K22MN",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBevsdZpJiIhrXJKvOSYipsYbqdUBBn6r6Hb.keWYwuyu5QJ84NCtr5ij3JMrlPglnBeeDch3kJBTCQneZnfl9dA-&format=source",
+   "desc": "Discord - Talk, Play, Hang Out\nGroup Chat That’s Fun & Games"
+  },
+  {
+   "name": "Disk Health",
+   "url": "ms:XPFFPQWNSF3VCW",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBQgBvwctUgQe2UBnNi0oRn_i3UuQsg5rd04qfHnv_NaexpxvzOOTvKmGJJqEoIQvYRp2KDcS9dQ1mFqtVf.9kPE-&format=source",
+   "desc": "A read-only Windows utility for checking disk health, reviewing drive status, and assessing potential data-safety risks."
+  },
+  {
+   "name": "Docker Desktop",
+   "url": "ms:XP8CBJ40XLBWKX",
+   "category": "编程软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxvHMT0riO5Ze2r4kAINc_2TZsaYzu9DrYmzh0RH40EuasQr7Z97gQ5YaRkZB07RScRU4BvcVpSuGx7Z5_Z5ElOk-&format=source",
+   "desc": "The #1 containerization software for developers and teams"
+  },
+  {
+   "name": "DWG FastView - CAD Viewer and Editor",
+   "url": "ms:XP8K3X7G6M37NX",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBS4KU8hqsk7UbryKIW4.RxZUZAwoSyHBuGWZ6ioHpq1IS1jaBW2tZtzL0qQZPpZigGpDF31iYFrwPocZUep2dVw-&format=source",
+   "desc": "DWG FastView for Windows is a lightweight dwg/dxf drawing viewer and editor produced by Gstarsoft, no need of dwg format conversion, vector graph magnified without distortion and full compatible wi..."
+  },
+  {
+   "name": "EmEditor (MSI)",
+   "url": "ms:XP9JZPSPCXGJX4",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBXvqW6JK9w_RvFwsyQuooxn_VVKx38Yq2oZQ.LE8GgWtlMkIiVF6pQBUZp0EOgexbEMVTnXft_XNOETHVVaYsQU-&format=source",
+   "desc": "EmEditor is a fast, lightweight, yet extensible, easy-to-use text editor, code editor, CSV editor, and large file viewer for Windows. \nThis is the Desktop Installer version of EmEditor distributed..."
+  },
+  {
+   "name": "Epic Games Store",
+   "url": "ms:XP99VR1BPSBQJ2",
+   "category": "游戏",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxg5le_71pSmzlLco9xckzgoQav8ygoBZNN.MN.2aAh2BVR1pcn5IYGrFb2QYIoHpRuwkLn1Ey21J6.FHkKETBEI-&format=source",
+   "desc": "The Epic Games Store app is your gateway to a world of games, apps, and creative tools for PC and Mac. Sign up for an Epic Games Account, download the launcher and get a free game every week!"
+  },
+  {
+   "name": "ExpressVPN",
+   "url": "ms:XP9M14XF781P6R",
+   "category": "安全防护",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxl_eSX9dEIboc0HgmpFsdjiaSh44Hy9gtVO0xXZkdyuDiCvdjuvtx_FIoQTR1U6XbsL2ILRhI1mG5Pr.yQndWgk-&format=source",
+   "desc": "ExpressVPN for Windows delivers fast speeds, Lightway Turbo, split tunneling, TrustedServer security, and servers in 214 locations."
+  },
+  {
+   "name": "Fing Network Scanner",
+   "url": "ms:XP8C8X2L629VS5",
+   "category": "安全防护",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBWQXGdR01blcbmmqXzL8M849gYcrDgnqq9bz97tHb8gmEyJBDYm0EPYHxouWfUtQtTs4m6qpIn6FNu7n6LXl0m4-&format=source",
+   "desc": "See who’s using your WiFi, block intruders from your network, pause internet access, schedule offline time, and find hidden cameras and network weak spots."
+  },
+  {
+   "name": "Foxit PDF Reader",
+   "url": "ms:XPFCG5NRKXQPKT",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBTuhe3y__RCMTX6VQQ6dJnhpX481vbUrXMNbBBJrbUqFZG9TSjNQV1o3auIE9qHoGdrz1bHpRPGgE_q9erLQYkA-&format=source",
+   "desc": "Foxit PDF Reader is an AI-integrated PDF solution that will revolutionize your workflow. More than just a PDF viewer, Foxit PDF Reader offers advanced functionalities to help you read, fill out for..."
+  },
+  {
+   "name": "Free Download Manager",
+   "url": "ms:XPDLMKFTXTDHSD",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBf5ZnXnMl_rd760sCzKS9ENz20qYyOVIE9TfI7WT5WxOgJwtxsqAOGlG5J.uloKJCH348TrrzTWBtLiVsJ9jGSI-&format=source",
+   "desc": "Free Download Manager allows you to adjust traffic usage, organize downloads, control file priorities for torrents, efficiently download large files and resume broken downloads."
+  },
+  {
+   "name": "Free YT to MP3 Converter",
+   "url": "ms:XPFF8BD2WH4F5X",
+   "category": "音乐软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBQ2l1cP_KkP4zYyA0g9FwJYk.ouTECtyXumJ4Z3UCubb3OdW8Vj4ztNXl021IQ2Er7nh9u2dpxSjC0BocaVDvPE-&format=source",
+   "desc": "Free YouTube to MP3 music downloader. No ads, no limits."
+  },
+  {
+   "name": "FxSound",
+   "url": "ms:XP8JK4TBQ03LZ4",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxniKPzBavToY5vvDU2aE3XG_1pF08L6.bdkd2NLYFn1DNNql55xq66ar1ueHHH0sjKZF816tJiLZEC1XsD9fC_8-&format=source",
+   "desc": "Boost Volume, Bass and Sound Quality For Windows"
+  },
+  {
+   "name": "GitHub Copilot App",
+   "url": "ms:XPDCK2L0R6V76J",
+   "category": "编程软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBdnYXsE2DJt0fofv1KwIGBllkXbrctVx2MGzDUvsgs0BEfW9IXJorWwUUbz.u3wl_oEDUaMyGLlP.oyqpzlpvKU-&format=source",
+   "desc": "Run AI coding agents in parallel. Build, debug, review, and ship code on GitHub."
+  },
+  {
+   "name": "GitHub Copilot CLI",
+   "url": "ms:XPDC8MMRVCF73P",
+   "category": "编程软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxrlcwZ_sLTFsfoqTxrz5PozJTQ14vDiGbuHiDftEeBTCn4RDi5_ZoOHy6lHUaDiI8V2QJA_OnvUSy7mErFSCvCA-&format=source",
+   "desc": "Coding agent in your terminal. Build, debug, and ship code with natural language."
+  },
+  {
+   "name": "GOG GALAXY",
+   "url": "ms:XPFFXW40W60KCF",
+   "category": "游戏",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBQ8eIl6L.opIPpanaFmoEW30BIfePJqXUrJ.EEefisrI8UsHFMEK4CsX1go2XtmpWEgwdVM9hLZ1U14o3.UsSHI-&format=source",
+   "desc": "GOG GALAXY app is your gateway to dive into the world of thousands of games available on GOG, from all-time classics and exceptional indies to modern hits."
+  },
+  {
+   "name": "GOM Player - Free Video Player",
+   "url": "ms:XP8LKPZT4X0Z0P",
+   "category": "视频软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBQD_joCKOJjTGeBwDMAW_cq0bOq7FLr0Iq7LSBzklf4_KfUd0rZSO6j59M_b7S0gbjA0J0A5Vrb.qzMK7cnUGec-&format=source",
+   "desc": "- Global No.1 Free Video Player\n- Movie Subtitles from Classics to Recent Releases\n- Vivid 360° VR Playback"
+  },
+  {
+   "name": "Hard Disk Sentinel Professional",
+   "url": "ms:XPDNXG5333CSVK",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBdn_vMjpEK3LYX0ZXblSLgPgVcR3GVP9wYEQ8JczbIF1jORyE9QVazyL2O7hErODzu0zr6ZvJ9qyBPzR9ZA42A4-&format=source",
+   "desc": "Hard Disk Sentinel is your ultimate data protection solution: monitors temperature, health and performance of your Hard Disks and SSDs, SSHDs and provides detailed hard disk information, statistics..."
+  },
+  {
+   "name": "HWiNFO",
+   "url": "ms:XP9CS6FHQ00B8J",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxqwrxlfAZV2gHnUDhqLaY.s8weNltxr_eo5lPxtajhhU5VxiCXk7syowj8BFg1qQdevkmP2zroybpL5Sr2DFSYc-&format=source",
+   "desc": "Professional System Information, Diagnostics and Monitoring."
+  },
+  {
+   "name": "iTop VPN",
+   "url": "ms:XP8JHCHZPD28NH",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBfklGDGlQO5Wf8XtWY2Ux1XCocjzzuYD4MSi6kK5U56Xs8UCtmXmlGFQDmuMoADnco5Ob4P99gjSTwSrXI8OF00-&format=source",
+   "desc": "iTop VPN is the best free VPN for PC to protect online privacy and access global content. This fast VPN offers a large number of VPN servers with stable connection, surfing the internet anonymously..."
+  },
+  {
+   "name": "JetBrains Toolbox",
+   "url": "ms:XPFPPN5PLH3BFV",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxqDhpdDKIR6lnN3qVUuYD8NChNah97nbA.Sp9a0yQTX2Z8wiiIW0ztWhCVc8zGnLHQQnPT5E9d9GH2v91zJ2SnE-&format=source",
+   "desc": "Use the JetBrains Toolbox App to manage your IDEs the easy way, freeing up more time for creative tasks."
+  },
+  {
+   "name": "JioSphere",
+   "url": "ms:XP9CS5WL1L07XG",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBa1D6_sf.CBe7COdHqvR43eH2rFZFFCnECMhvt0k98lFm3KGXHBiatebO1zizaM.hDAAY6mx_c.m2koFYVkhMSg-&format=source",
+   "desc": "Fast, secure, and built for productivity. Enjoy ad-free browsing, multiple search engine options, and seamless sync across devices. With privacy-focused features, custom home screens, and integrate..."
+  },
+  {
+   "name": "JOPDF",
+   "url": "ms:XPFPK89PKLBPFH",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBX78KFvk4KWcN1Y.fd9OPyufTMjZY0FkBahOaCUmXSf1FyEzg06.t3G7F57CeGWlcbLctYhiwF7JjTaCgVcX10k-&format=source",
+   "desc": "JOPDF is a completely free PDF editor that lets you edit, annotate, manage pages, and protect PDFs with passwords. It provides an easy and effective way to handle your PDF files."
+  },
+  {
+   "name": "kenoxis driver updater",
+   "url": "ms:XP8BWC1WC40226",
+   "category": "编程软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxu_zaFHvNZ48sQkS8Ga.OdfOKAV4K7mN_Nr.RJ.lRYcs8hbY1Uo0qmJpb7FCeE9yFuuq5lTomZ_tXM_0._RSc6s-&format=source",
+   "desc": "15 days free trail version\n\nSecurity Checkup\n\nScans your system for outdated or vulnerable drivers to ensure maximum protection and stability.\n\n\n\nBackup & Restore\n\nAutomatically backs up your exist..."
+  },
+  {
+   "name": "LINE Desktop",
+   "url": "ms:XPFCC4CD725961",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxhpcoRRmEZ4._56d00ABZ4X.7YrfWJb_c3RqUG6K1mhjfFDu5zcqLAyX2XA9JvQ91Qt3ng3md4.zcEHpPXI5FPI-&format=source",
+   "desc": "LINE reshapes communication around the globe, letting you enjoy not only messaging but also free voice and video calls wherever you find yourself. Download LINE now and stay close with your favorit..."
+  },
+  {
+   "name": "Mailbird",
+   "url": "ms:XP9KHKVP3JKR39",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxhpMUJLPh2pPDaTrGN_KPk5Zw2BdPcqnfij6pwegfihnom9YgvWSxgSvwHp8Yq.HAQyD.gMa8Exri_Sk6O4BmC4-&format=source",
+   "desc": "Mailbird provides a clean, simple and lightning fast email experience for Windows 10 and 11."
+  },
+  {
+   "name": "Microsoft Copilot",
+   "url": "ms:XP9CXNGPPJ97XX",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBQA8uRufRZOr.EeAXV6Zb_xqvqWqhN9.oKWZlid3UeTZacYlV9V13cR9IETUBmWC6w6WlaXSBm8X6EozyRKNqB4-&format=source",
+   "desc": "Microsoft Copilot is the AI built for work. Integrated into the Microsoft 365 apps you use every day, it connects to your work context, completes tasks with Cowork, offers leading AI models, and ke..."
+  },
+  {
+   "name": "Microsoft Edge Browser",
+   "url": "ms:XPFFTQ037JWMHS",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxnhbAKvZT06Ee1TnhVHXwv8bCV1yiNuvvt7kj56j3e7IKM1nN5oXKljZdJ67mjum54jkpW5DzceH0PrakbmZsRg-&format=source",
+   "desc": "Microsoft Edge is the AI-powered browser. A smarter way to browse. As the only browser built and optimized for Windows, it’s AI-powered tools are designed to help you make the most of your time onl..."
+  },
+  {
+   "name": "Microsoft PowerToys",
+   "url": "ms:XP89DCGQ3K6VLD",
+   "category": "编程软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBRY0umJKt.GQbXbqRe3O0.PrCqIycSiRdeGINYu7JT4eoliZlTCLH9987RHqdqCx_8OUYOnq7dk44xdlrH0wlbc-&format=source",
+   "desc": "Microsoft PowerToys is a set of utilities for power users to tune and streamline their Windows 10 and 11 experience for greater productivity."
+  },
+  {
+   "name": "Microsoft Teams",
+   "url": "ms:XP8BT8DW290MPQ",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxi87FXbfaqfqVR.HAnzNbchdxTrX6oTHYnKJYGjY.uNRLC1xtHwTCnBNHfwM.TY69WKyCTG.bjYnwWsp6KkJsEM-&format=source",
+   "desc": "Make amazing things happen together at home, work, and school by connecting and collaborating with anyone from anywhere."
+  },
+  {
+   "name": "Mixxx",
+   "url": "ms:XP8LCGHCD8Z2BL",
+   "category": "音乐软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBShkvCqzkq8QMoRCGWKwudQUNDaohVMQAiuRPdMzjvSM0QE.mVZOqqoCDavMUATmlJ5kY9P7yvxadMNR5GEtOSs-&format=source",
+   "desc": "Mixxx integrates all the tools DJs need to perform creative live mixes with digital music files."
+  },
+  {
+   "name": "Moises Live",
+   "url": "ms:XPDF75XHHZTNHW",
+   "category": "音乐软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBZibx2pA.chRyGAEACual.z.NNVtWAmUZHzno2xOnNk419H_Ocj52GBc.qF7EQf1AlzSJ8CvKu7NPe1qALomKiQ-&format=source",
+   "desc": "Level up your audio with Moises Live (Beta). Our Smart Volume Control gives real-time system-wide control of vocals, instruments & dialogue in any app or website. Practice, remix, DJ, watch movies,..."
+  },
+  {
+   "name": "n-Track Studio",
+   "url": "ms:XP8LG4ST7H3GBF",
+   "category": "音乐软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxtuhXNasawj1pB1zahQ1bVDQnOntmVh9bpLkmW7duvUnPPz5Z11X4UKwAjoo7pU1wal3dWAM3BC6nrQ_5f6kxwQ-&format=source",
+   "desc": "Unleash your musical potential with n-Track Studio 10! Create, sample, mix and master music. Play and record instruments in ultra-high quality. Make beats with Step Sequencer. Add FX like VocalTune..."
+  },
+  {
+   "name": "Notion",
+   "url": "ms:XPDBVSS44R0L9H",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBUDu2rz06EjlN1L8I9rDKxNCg2IGGbTjQOO.5uaFqsF_8iCTEsh1tMbIuCdEmsQoq1218ttC.RegNjfGzkysuHc-&format=source",
+   "desc": "Write, plan, organize—with AI."
+  },
+  {
+   "name": "NVIDIA App",
+   "url": "ms:XP8CLZL93F5Z4P",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBVu6Azyo5P.pIC7jrmebV6e.vxcNIYZlJ.JTfNmfkqPYCHLx_iy1563eIdv9QJeQG2B1P7HUe4CN25KgVyarcjc-&format=source",
+   "desc": "The essential companion for PC gamers and creators. Keep your PC up to date with the latest NVIDIA drivers and technology. Optimize games and applications with a new unified GPU control center, and..."
+  },
+  {
+   "name": "OBS Studio",
+   "url": "ms:XPFFH613W8V6LV",
+   "category": "图片图形",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxrAWesIFQqd_JTUGW7KWQr7NhksAJbzFaDDplIJMJOr9kCGglM1CfegX4SzSyiTvGLKCYUvS3bx34vRRMRmSgrs-&format=source",
+   "desc": "Free and open source software for video recording and live streaming"
+  },
+  {
+   "name": "OneNote",
+   "url": "ms:XPFFZHVGQWWLHB",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxoSyrqp5dbqOAqvr8vOzXwB76Q8SbEv7tW2yfKHtyqA1CZfQBsus2k0qWJlAsYox2NEnElKuyN.qwSGNeep2uU8-&format=source",
+   "desc": "OneNote is your digital notebook for capturing and organizing everything across your devices. Jot down your ideas, keep track of classroom and meeting notes, clip from the web, or make a to-do list..."
+  },
+  {
+   "name": "ONLYOFFICE",
+   "url": "ms:XPDLH3XBZXQV23",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxkQTbNRTOR.6I6rYDrbatZuQL_r8I1KhKhwaxEgiJiGh9GenDhH5I5BiwHYSfy93ayPbYY_B.8Z_bil7ta5bqZA-&format=source",
+   "desc": "A free desktop office suite for seamless document editing and collaboration. All the tools you need to work with text documents, spreadsheets, presentations, fillable forms, and PDFs."
+  },
+  {
+   "name": "OpenVPN Connect",
+   "url": "ms:XPDLGW32HHRB5P",
+   "category": "安全防护",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBfco4uhHACAgmD31q1S6FeDK3_KNvCoaidbxUsymHYkvElDGbwCqQQOn15XgvMfJKaHLQPCdSh3KEpJaV18nm5M-&format=source",
+   "desc": "Official OpenVPN® client for secure access. Connect to Access Server or CloudConnexa® Zero-Trust VPN solutions by OpenVPN."
+  },
+  {
+   "name": "Opera Browser",
+   "url": "ms:XP8CF6S8G2D5T6",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxvY31IO5fkvevmwdsMiJDd3SdMD0dwcDh5u1xnelz88nO.NrptBTHEctsL4y2V8b92DlbkrkaStDOFbvSzA664s-&format=source",
+   "desc": "More built in. Free VPN and Ad Blocker for control, Tab Islands for structure. ChatGPT, Gemini and Opera AI in the Sidebar."
+  },
+  {
+   "name": "Opera GX",
+   "url": "ms:XPDBZ4MPRKNN30",
+   "category": "游戏",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxqxPHg7zWHYaGX8YPgtp87IfpSQ0VKfopn4.T5A9onojzx31CMCyUUS.Nda_f5UjZY_kmlINTLkWBN.i0YyqwEY-&format=source",
+   "desc": "Your browser shouldn’t slow you down. Opera GX gives you total control over resources, mods, music, and style — all optimized for gaming and power browsing. Own your browser, finally."
+  },
+  {
+   "name": "PC Internals - Hardware Monitor & SSD Health Check",
+   "url": "ms:XP8JJHGVKFGF2M",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxgL2mcxxTurLy96HSWMYxI9IESl3lTATdntRwoxfLKkUiJXWOlu_mW1SLIndtF.V.IEoa6GWJSuFNXiToz91Gno-&format=source",
+   "desc": "Complete PC diagnostics: CPU, RAM, GPU, SSD/HDD with SMART monitoring. Real-time temps & usage stats. Automatic alerts for critical SSD values. Perfect for IT pros & gamers."
+  },
+  {
+   "name": "PDF24 Creator",
+   "url": "ms:XPFD51H3VQZFM0",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxpyz8khOE3hatMGo2TD262JGokXUe3pOEQprbZacukFrX1wAjXI.RNCN_vwUbrzV_T68UlYZAXr2EVPrtiDwnCo-&format=source",
+   "desc": "Free and easy to use PDF solution with many features. PDF24 Creator brings all PDF24 tools as offline version. All files remain on your PC."
+  },
+  {
+   "name": "PixPin",
+   "url": "ms:XP89F3CGSRZHC7",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxj5PlR2n3xL6SwP4qFLRSgh.cZLFZ2TBRBsmIId_b0pRpQC1_G1XnQmm1flzF4zvkU5lJbUwDTCMVTgjK7WQaZw-&format=source",
+   "desc": "PixPin is a free screenshot app for capture, pinning, OCR, scrolling screenshots, and screen recording."
+  },
+  {
+   "name": "Plex for Windows",
+   "url": "ms:XP9CDQW6ML4NQN",
+   "category": "游戏",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxs8TlbLor9feBfrt9RoDWVE10FrqPBn9ij1kUP4KrznUbYNx_HOYUbuOKuFH3OLMkzoagA8uS32wRRZaKWbI09g-&format=source",
+   "desc": "Plex for Windows is your client for playback on the Windows desktop. It features the point and click interface you see in your browser but uses a more powerful playback engine as well as some other..."
+  },
+  {
+   "name": "Plex HTPC",
+   "url": "ms:XPFFFF6NN1LZDQ",
+   "category": "游戏",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxhTCQHD67ZOt1MX4swewQwXId0uudxmPMBB1QiP44BJtgqW7jywFsM4.GxROyoGV78IEi3XsZQR8kei8V4lSMfs-&format=source",
+   "desc": "Plex HTPC is the dedicated home theater app with a gorgeous UI designed specifically for the big screen and all the HTPC essentials like sophisticated remote/controller support, refresh rate switch..."
+  },
+  {
+   "name": "Plex Media Server",
+   "url": "ms:XPFM11Z0W10R7G",
+   "category": "游戏",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxg_jitffXtarJCV1lfT4VA0f5TcjPjoQkxfUjxqoTX30UkiHgIjLgqhgYU7ovsSU2olDKIN_XsUYzVI_3KpfwjI-&format=source",
+   "desc": "Description\nPlex is the key to personal media bliss. Once you download our free and easy-to-use software where you store your files (usually a computer or external hard drive), it takes care of the..."
+  },
+  {
+   "name": "PotPlayer",
+   "url": "ms:XP8BSBGQW2DKS0",
+   "category": "游戏",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBQqJcI.j2SjwE0yhR9mJJrDkBbyt8NhB.bX2VKFMB.eG73vrwIskhnkHc.1U2B2WKVk_fOTUw2QGdEx5b.1ySQw-&format=source",
+   "desc": "Potplayer is a powerful All-in-one multimedia software player."
+  },
+  {
+   "name": "PuTTY",
+   "url": "ms:XPFNZKSKLBP7RJ",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxrDCrF4C8KvxYUkHBppqZeaAHgtS.ICnnhnhe3lX0zv1SxVjkHhP1OzDXPQnBsn3EJQ9pIsOO89zmh3bNP4GJlk-&format=source",
+   "desc": "SSH and serial port remote login tool"
+  },
+  {
+   "name": "Samsung Magician",
+   "url": "ms:XPDDT99J9GKB5C",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBZSRltq8z8LSOCEnstpw6f4meRuNtAY4tqCxJ7q7XcO_Z1aKSERj9S_cF4O73hUlZsxIS5_0itLxxa7EcRyvBVI-&format=source",
+   "desc": "Samsung Magician allows users to conveniently manage their Samsung SSD."
+  },
+  {
+   "name": "Screen Recorder - Bandicam",
+   "url": "ms:XPFFZBX52W36XK",
+   "category": "视频软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBdWy0hjk3i_ZyHiqgGLt3IUuj79RPK5v3zTJ7FCWH2ce9nKxnkPNC7.83I6TdDWYAzp0I0UDqalf194cGc4OuuE-&format=source",
+   "desc": "Record screen, games & webcam with virtual background. Add AI subtitles and edit videos seamlessly!"
+  },
+  {
+   "name": "Signal Private Messenger",
+   "url": "ms:XP89119P9F2PCQ",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBb9vwDabMciD3mWr5V2H4Kca8a_nNK1CxduzD6NdD28_o2iT3CWPyku1lNQnABL5yyOZ4ChCiR.jVbaEuiXjI64-&format=source",
+   "desc": "Signal is a messaging app with privacy at its core. It is free and easy to use, with strong end-to-end encryption that keeps your communication completely private."
+  },
+  {
+   "name": "Snagit",
+   "url": "ms:XPDNSF6TXN2R6Z",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxkHeC7ZzZlVhbcPKjN_98zEW2a7pAMcfnGswna6TfQWPRHq3SpcI6nBbX_bEMsXRw87qx._VSg51SNTwCr83b8U-&format=source",
+   "desc": "Simple, powerful screen capture for clear communication and documentation."
+  },
+  {
+   "name": "Spark Desktop",
+   "url": "ms:XPFCS9QJBKTHVZ",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBTbNGyFf9BfjiAd6qaNYQRHaVoAEjH.zDwz_vizie9XS7kks.2M4Sw8QBJqRlBSp0cUZbT01e3Lznl2nvgG.C88-&format=source",
+   "desc": "SMART. FOCUSED. EMAIL from Spark helps you focus on what’s important and ignite your productivity with fewer distractions, better organization, and greater control. Bring multiple email accounts to..."
+  },
+  {
+   "name": "Speccy",
+   "url": "ms:XPFFT31D40MGFQ",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBdSW2I7gckWQuj1S4Es7Cb6AKM85N15BKToTRgo9IG6PExguZZQX8dhji04zaKSBskXDRlTo5PgYD3oWB_CS2jU-&format=source",
+   "desc": "Speccy is a fast, lightweight, advanced system information tool for your PC. Popular with gamers and tech enthusiasts!"
+  },
+  {
+   "name": "SplitCam Live Multi-Streaming",
+   "url": "ms:XP9LDD8RH8N231",
+   "category": "视频软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBbFyznExCN6yUC7Tvp8IDLHHn51Wm.gnBUxBKdVqOwwvRV3TOAxMOmwjlL18gaOTNxfw9N3Yy1Fvmu992iC3bSU-&format=source",
+   "desc": "SplitCam is a Powerful Live Multi-Streaming Studio Software\nSplitCam is the easiest way to start your live streaming session on any video platform. It only takes 5 minutes for a new SplitCam user t..."
+  },
+  {
+   "name": "SQL Importer",
+   "url": "ms:XP9M2FBRLMTWKV",
+   "category": "编程软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxroM.0MhznEiGJOsi0Jg.ZeXtPv3c3gXfw3MXAN1smonWjT3zHY9DO..6sHrMRZGgtuX2BKwhTiJp.raOOPphDU-&format=source",
+   "desc": "Bring automation to file import with SQL Importer. It builds and imports into optimized table structures, fixes broken records, and much more."
+  },
+  {
+   "name": "Stable VPN - World VPN",
+   "url": "ms:XP9K98DFHHXHPQ",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBQWzqeATdhPR_1sw7KC9.tYuDDC.rq2bEw7H8L.hCHBAN_JXmtFZIy7irbcixArq2QNJZlS7SqFbABlSXprA6QY-&format=source",
+   "desc": "World VPN is a fast and user-friendly VPN for Windows. Access websites without restrictions, protect your privacy, and connect to the internet with a single click. A free 24-hour trial is available..."
+  },
+  {
+   "name": "System Informer (EXE Setup)",
+   "url": "ms:XPFMX3KSKZ523M",
+   "category": "编程软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxrLwbCnD7.OhVaRSTa5k02jsj.nWCHo1dbvdWSLVtAxfcf.NguMO66aAKUckmGzGNWWLEWERg7pTskNCsZMepR0-&format=source",
+   "desc": "A free, powerful, multi-purpose tool that helps you monitor system resources, debug software and detect malware."
+  },
+  {
+   "name": "TeamSpeak",
+   "url": "ms:XPDCJ80KGNRVSS",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxvYCyOLZceV1bKeOwsVaBZrcFtqnPntEk20_EUixkBm3KtfSYyg389p.mtaRx0NA1xvWN6MepVrDW6cOdUEtOF4-&format=source",
+   "desc": "Test-drive the all-new TeamSpeak and enjoy crystal-clear voice chat to communicate with your team mates cross-platform with lag-free performance and unparalleled reliability."
+  },
+  {
+   "name": "TeamViewer Remote",
+   "url": "ms:XPDM17HK323C4X",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBZA9.efLCW1xX72XcLffofDgt7z7bmWD9BGzeQmscfRVF0gf4OyWh6gYI7hHN6et7ZcsOCX3tULoS6bjeg.d_VM-&format=source",
+   "desc": "Stay connected anytime, anywhere with TeamViewer Full Client - for personal or business use."
+  },
+  {
+   "name": "TeraCopy",
+   "url": "ms:XPDCCPPSK2XPQW",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBeYnpjc8Fv8jGP3a87EPS6byXogJuLoGhHkAH204nH4cwJmkBatwdnCkyfThVFIiHEWDJ9TIUsEfQfzwEsYzPWU-&format=source",
+   "desc": "With its array of features, TeraCopy stands as a renowned file transfer utility, meticulously crafted to enhance and streamline the process of copying and moving files."
+  },
+  {
+   "name": "TreeSize Free",
+   "url": "ms:XP9M26RSCLNT88",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBdztSSR_EBHLTm_Rgd1sgTkOmSNpcyHy_31CG3A2s3xnaH2e_PqkyJrS3CoyCbg0BaKn08msnAiKFlGz2yOskh8-&format=source",
+   "desc": "You open the Windows Explorer to check on your hard drives and all you see is red? There was room on your hard disk yesterday, but today it is gone? There is help! \n\nThe disk space manager TreeSize..."
+  },
+  {
+   "name": "Typora",
+   "url": "ms:XPFPH15B9DLNZH",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBUHB8XVsNBXUyDVE8NFbfxUwPLRcLXp.GBDtax2LBgxVdImGyC9Xg2mBl71GY7AwOszo8vBzzNlja.Ke7LK5W2A-&format=source",
+   "desc": "Typora – a minimal yet powerful markdown editor and reader."
+  },
+  {
+   "name": "Ubisoft Connect - PC",
+   "url": "ms:XPDP2QW12DFSFK",
+   "category": "游戏",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBXc2WSUNqWS5YVUYAOtAYjcZPR4RkXHthpR0hN4fKe3UsuwDAkVsT8u40M0dkg3qCsOrtLCLMRxNA3aq4qX7TEg-&format=source",
+   "desc": "Ubisoft Connect PC is your gateway to all Ubisoft worlds! Download our desktop app to make the best of your Ubisoft games on PC.\n\nManage and play your games, connect with friends, and enjoy our uni..."
+  },
+  {
+   "name": "UC Browser",
+   "url": "ms:XPDBW109BT0D89",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBQnLCZ383PJxpca1JnwSfWJ2BlwXnCwd1KMdTnThdhkLQf13h_2cPkQIHsVLRfoSUoHWaKHUy4YB9Uj1lE4YdwE-&format=source",
+   "desc": "UC Browser - fast internet for seamless browsing and smooth surfing.\nUC Browser PC version provides you with a fast online experience - search, browse, download, watch videos, play games, shop onli..."
+  },
+  {
+   "name": "UltraSearch",
+   "url": "ms:XPFMFQSSX39XH5",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxk7qWWzgtytLae5aOyRGsiyHkuc7RoTcs_vckl1kUYpM0_RqGtoMUvwn_F8n9jG_wPh4X.GP65HBwEG_oaKIQPY-&format=source",
+   "desc": "UltraSearch finds your files and documents on all your connected hard drives and network drives in seconds."
+  },
+  {
+   "name": "UniGetUI",
+   "url": "ms:XPFFTQ032PTPHF",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBfPbx2mmsxxWQruSsZm3ZFK.seqtB_L2x3ziSZi0PpzAz4oJ2ugjXv1Nv0eUwDZaHkiFPQaCdYsyntVcd0o6q6M-&format=source",
+   "desc": "An intuitive GUI for the most common CLI package managers for Windows 10 and 11"
+  },
+  {
+   "name": "Viber",
+   "url": "ms:XPFM5P5KDWF0JP",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxuSL05PNf_ktEr5sRD3S9V1JSsk8GMNp8pmryTRxkFsjTUnJ3zSy75sr5wn4VFmXN3l55wKbP6ahLrcrkyJ5LYc-&format=source",
+   "desc": "To use Viber on desktop, first install it on your smartphone. Go to your App Store or Google Play & download Viber to start chatting!"
+  },
+  {
+   "name": "VirtualDJ",
+   "url": "ms:XPDC1LX9VNW7Z7",
+   "category": "音乐软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxgYWUNjm2XSt2u5MsW6P5mIAR4fKwW5qiYonqOwmP_.C87h4prgvsmshl2_EfAPPNiCN0utXaama3y._S.LnRLY-&format=source",
+   "desc": "Professional DJ software with more than 150 million users, perfect both for aspiring DJs and professional superstars, VirtualDJ brings the most advanced technology to pave the way for the future of..."
+  },
+  {
+   "name": "Visual Studio Code",
+   "url": "ms:XP9KHM4BK9FZ7Q",
+   "category": "编程软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxj7kCzMIlSC20SNjaJf9GmESvWFqgy6FNrwzWSIu2lzePyWSz8zg09RAX43OFexidzEE3_7l3auaKk4w9ktJdqg-&format=source",
+   "desc": "Free, lightweight, extensible code editor for building web, desktop, and mobile applications, using any programming language and framework."
+  },
+  {
+   "name": "Visual Studio Code - Insiders",
+   "url": "ms:XP8LFCZM790F6B",
+   "category": "编程软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxnuwhvZJBcOoTALhdIGiPXTFuic1OgxyJbFmW9YsGC9tUuAtDUgoW.kOTstnHK_0TgZoxclqfZpoO0HgK4oN0Ec-&format=source",
+   "desc": "This is the insiders build of Visual Studio Code, which contains the latest features shipped daily. Visual Studio Code is a free, lightweight, and extensible code editor for building web, desktop,..."
+  },
+  {
+   "name": "Visual Studio Community",
+   "url": "ms:XPDCFJDKLZJLP8",
+   "category": "编程软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBQk4Fgd0cYavEztNLFcVkRBRvOZ40AdH17uQXVRXdtvNuXjTF6d4SVvTokMOzHlFurktQtIwTW_ULiDeOD9ge8Q-&format=source",
+   "desc": "A free, extensible, AI-integrated development environment with built-in designer, editor, debugger, profiler, and Git tools, plus agentic AI to help you design, build, and deploy modern cross-platf..."
+  },
+  {
+   "name": "Vivaldi Browser",
+   "url": "ms:XP99GVQDX7JPR4",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxg753jzlzDNblmO59ul5I1gXz4SoJwXMKQ.rQDVGelF8PIHy3wf8yw7NdrPMXioxHju5Woqf.tDstmkRYNVtUdo-&format=source",
+   "desc": "A Powerful. Personal. Private. web browser"
+  },
+  {
+   "name": "VLC",
+   "url": "ms:XPDM1ZW6815MQM",
+   "category": "视频软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxiJK_HEPrjdesdyeQIKBd8CBvNetP6BxGK.pnI6V6UrP..SFKuYcvjaTTLsMfla_EO_Eyc658MMDVP0xiKCnUoo-&format=source",
+   "desc": "VLC media player (previously the VideoLAN Client and commonly known as simply VLC) is a free and open-source, portable, cross-platform media player software and streaming media server developed by..."
+  },
+  {
+   "name": "Voicemod",
+   "url": "ms:XP9B0BH6T8Z7KZ",
+   "category": "游戏",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxk5GSxbT4EAnsZ_ObPZJEhGGyU.wjiN1pnxg6PQWNPGfFRQDK4i0Gh4vRuKwOlFVSkxI3hU5FigKyTo6G5BMLdA-&format=source",
+   "desc": "Boost your sound wherever you hang out online with Voicemod—the leading real-time lag-free AI voice changer and soundboard app!"
+  },
+  {
+   "name": "VPN Proxy Master: Unlimited VPN for PC",
+   "url": "ms:XP9CP2KCBPB2N8",
+   "category": "安全防护",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxqpQPsUNCTb0MvjF8Y3dy_y_jhSRN73nWHLxm.0oPMQ0Vwq30f0cRhQMu2g6NDHniC7jH_Ou1JOt8fDY0VSnJ4s-&format=source",
+   "desc": "VPN Proxy Master help you access website and apps safely, safeguard your personal IP, satisfying your online entertainment needs and security demands in the same time!"
+  },
+  {
+   "name": "Webex",
+   "url": "ms:XPDLZV7R88FF1P",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxiKZNNZXaZSBp18rwRUgQU1rvteBxjzk.GXdPbSrPJgD91dR2.XRIez6k6K.6E4f81fi0Ywb7vehOO97_A3f.yA-&format=source",
+   "desc": "Impressively secure. Incredibly collaborative. The world becomes your workplace when all of your work is in one app."
+  },
+  {
+   "name": "WeChat",
+   "url": "ms:XPFCKBRNFZQ62G",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxl33gjvYDEfZR.qiz4WDwgZk4jyYhaLcYhZ53hbGsrtrEHgZtrb7TNNfsfh_xkaTG4pzND9FXzEeK38ptnRbico-&format=source",
+   "desc": "Connecting a billion people with calls, chats, and more.\nWeChat is more than a messaging and social media app – it is a lifestyle for one billion users across the world. Chat and make calls with fr..."
+  },
+  {
+   "name": "Wondershare EdrawMax - All in One Diagramming Tool",
+   "url": "ms:XP8JMKMC3GVX23",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxk0laNl49EbfvDury05y8H0CacTRqjQNRNRQy0h4n6vnmlkAQMz8Zg3C7v.4qpmSxSjQ8rhR4nRJZamm2FIO0ro-&format=source",
+   "desc": "An all-in-one diagramming tool for creating over 280 types of diagrams, including flowcharts, network diagrams, floor plans, mind maps, presentations, and more."
+  },
+  {
+   "name": "Wondershare Filmora - AI Video Editor",
+   "url": "ms:XP8JNPKGTV6NRL",
+   "category": "视频软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBa7zxKRDO0iThlyckP8EMeeiS99pJXEK4Qhvvo4FzU7e2tSTEKFPftBeDu9IqSaufm187EnAq2b9BKCLLRHWglU-&format=source",
+   "desc": "Empower your imagination with Filmora AI Video Editor, a smart video editor with powerful tools"
+  },
+  {
+   "name": "World of Warcraft: Forever",
+   "url": "ms:XP9B7NCFMDKPKM",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBRijWri.Q.SdH6qOCfy_qcR1tXkqbMHskL1VENOQWoS.ehx7HPzMlYXKC2.DPqjHyBlqzMbNSwU1h9A8YdXfEmk-&format=source",
+   "desc": "World of Warcraft: Forever builds on the original WoW experience with new and reimagined zones, dungeons, raids, and classes, plus a new playable race, updated world graphics, and over 1,000 new qu..."
+  },
+  {
+   "name": "World of Warcraft®",
+   "url": "ms:XP9CKPHR0JP7F7",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBQV2BNHh3ZPgnYYQqXPR237TKooaW5NSlR.Wf23dMLacURbrWKUxJLzmibB2jOXfQGN2sMNoi.ly2nLNn3mE..Y-&format=source",
+   "desc": "The Worldsoul Saga is the most ambitious narrative endeavor in WoW®’s history. Jump into The War Within™ now to experience the thrill, camaraderie, and excitement that only World of Warcraft can of..."
+  },
+  {
+   "name": "WPS Office Suite - PDF, Docs, Spreadsheet, Slide View & Edit",
+   "url": "ms:XP8M1ZJCZ99QJW",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxgL5uSjq3_bphQCQXpU0WDKLN6iZOWS4fbT2PcCEJD3tF1QHfTisA0M5VQQlx2iaFpQkp7G2wPyiWeOFpp9L6oc-&format=source",
+   "desc": "All-in-one office suite for Windows to create, edit and read documents. Powerful PDF editor, PDF reader and PDF converter with PDF to Word, Word to PDF and scan to PDF. Open and edit Word, Excel sp..."
+  },
+  {
+   "name": "Xender - Share Music Transfer",
+   "url": "ms:XP88X47Z2X9STR",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxgSaO729lq9qFgSQ.4QQfXuWcZ9Cgcwswoj1lRRFIPxcR4EnU0AbTMRZzlMsNecSgZXtwfxtd8hazJxJLIONZvg-&format=source",
+   "desc": "Xender - best sharing app fulfilling all your transfer needs\n\n☆ Share Music, Share Video, Share Photo, Share MV, Share It, Share Me, Share File\n☆ Transfer any files (app, music, video, pdf, Word, E..."
+  },
+  {
+   "name": "Xmind - AI Mind Map",
+   "url": "ms:XPFFBJ2C6B1JGR",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxjZhnM46aooEL1uHIDgdgPyjvQ3nlUhqIbT.VI6laN.cS2p_X7.MgRJGYKNBZnYKIPUsIfiz5I7sDauJnNZ46Pk-&format=source",
+   "desc": "The full-featured mind mapping and brainstorming app. Like a Swiss Army Knife, Xmind offers a complete toolset for thinking and creativity."
+  },
+  {
+   "name": "Yandex Browser",
+   "url": "ms:XPFCFKCNNTXGQD",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBVHUxFRQq9H9OHp6QfMsh3uGPgwVYYq05ANj4a8RuplqVwwlsPjPLiWG8hm5DNG3_kH1DYBVVKnC7ekgyc_E8ZE-&format=source",
+   "desc": "Yandex Browser stores your passwords, protects against viruses and scammers, and loads websites and videos quickly even when you have a slow connection."
+  },
+  {
+   "name": "YT Video Downloader – Free",
+   "url": "ms:XPFFDCD2PS6DGH",
+   "category": "游戏",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBUmMMe65yEonQ85VOQhytt4ZYJjwwIXSPeWUYXO7Da495_Lm4tZ2lB3bQp_TS114DVPPjz7PbpBnHyhsmVkY3aU-&format=source",
+   "desc": "Download YouTube videos and music in 4K and MP3 for free. No ads, no limits."
+  },
+  {
+   "name": "Zoom Player",
+   "url": "ms:XP88X30WJ519GR",
+   "category": "视频软件",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxtTIlF1XzPB_PEV.AJXbNZNLEMToo_XjjG5rnnL5N1uear3qO9mpqVlormQPbREEuI9EaB9RdQ7MgLr1wBieo40-&format=source",
+   "desc": "Play every format. Stream YouTube & Radio. The most powerful and versatile media player for Windows."
+  },
+  {
+   "name": "Zoom Workplace",
+   "url": "ms:XP99J3KP4XZ4VV",
+   "category": "办公教育",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBfLf9EetALaWlLDJdgfp14FAtJl7mHqbui.GtMR8.6yyQL7UbLxCNSp1wsDDsGUUFjMsqHN0Qxr8_ApNmb7EhpI-&format=source",
+   "desc": "Zoom is for you. We're here to help you connect, communicate, and express your ideas so you can get more done together. We're proud to be trusted by millions of enterprises, small businesses, and i..."
+  },
+  {
+   "name": "카카오톡",
+   "url": "ms:XP9K178L5G0JQ0",
+   "category": "系统工具",
+   "logo": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHHFT949fUipzkiFOBH3fAiZZUCdYojwUyX2aTonS1aIwMrx6NUIsHfUHSLzjGJFxxtZdWw6g4UwahLJywNYpykrQjXZIsfwDXNTsYEdSL5e7sKS9O6NtzuhHmHFCXHCRL1RNrF1UNHoBmnloYkA_LHU-&format=source",
+   "desc": "KakaoTalk - the free, fast and fun messenger!"
+  }
+ ]
+}

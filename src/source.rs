@@ -324,8 +324,9 @@ pub fn repair_links(token: &str, apps: &mut Vec<App>, note: &mut dyn FnMut(&str)
     let mut mirrors = Mirrors::load();
     let mut stats = RepairStats::default();
 
-    // Lenovo links are minted per request, and a GitHub row carries a promise
-    // (`gh:owner/repo`) rather than an address, so neither can be probed.
+    // Lenovo links are minted per request, and lazy rows carry a promise
+    // (`gh:owner/repo`, `ms:PRODUCTID`) rather than an address, so neither
+    // can be probed.
     let mut unknown: Vec<String> = Vec::new();
     for a in apps.iter() {
         if a.origin() == LENOVO || a.is_lazy_link() {
@@ -780,6 +781,7 @@ fn tencent() -> Result<Vec<App>, String> {
                 is_advert: None,
                 source: Some(TENCENT.into()),
                 category: Some(label.to_string()),
+                hash: None,
             });
         }
     }
@@ -1157,7 +1159,11 @@ fn parse_custom(item: &serde_json::Value, source: &str) -> Option<App> {
     let name = text("name").filter(|s| !s.is_empty())?;
     let url = text("url")
         .or_else(|| text("download"))
-        .filter(|u| u.starts_with("http"))?;
+        // `ms:PRODUCTID` is a lazy link: the Store manifest is resolved only
+        // when the user downloads, so the card itself needs no live URL.
+        .filter(|u| {
+            u.starts_with("http") || (u.starts_with("ms:") && crate::msstore::valid_id(u))
+        })?;
     let id = format!(
         "C{}",
         item.get("id")
@@ -1180,6 +1186,14 @@ fn parse_custom(item: &serde_json::Value, source: &str) -> Option<App> {
         is_advert: None,
         source: Some(source.to_string()),
         category: text("category"),
+        // A malformed digest is ignored (the file is simply not verified)
+        // instead of making every download from the feed fail forever.
+        hash: item
+            .get("hash")
+            .or_else(|| item.get("sha256"))
+            .or_else(|| item.get("sha256sum"))
+            .and_then(|v| v.as_str())
+            .and_then(crate::hash::normalize),
     })
 }
 
@@ -1301,16 +1315,67 @@ mod tests {
             "url": "https://example.com/tool.exe",
             "size": "12 MB",
             "logo": "https://example.com/i.png",
-            "desc": "内部分发"
+            "desc": "内部分发",
+            "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         });
         let a = parse_custom(&v, "内网").expect("valid entry");
         assert!(a.id.starts_with('C'));
         assert_eq!(a.source.as_deref(), Some("内网"));
         assert_eq!(a.desc.as_deref(), Some("内部分发"));
         assert_eq!(a.version.as_deref(), Some("1.2.3"));
+        assert_eq!(
+            a.hash.as_deref(),
+            Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+        // A broken digest is ignored rather than making the feed unusable.
+        let mut bad = v.clone();
+        bad["sha256"] = serde_json::json!("not-a-digest");
+        assert!(parse_custom(&bad, "内网").unwrap().hash.is_none());
         // Missing url / name are dropped instead of producing a dead card.
         assert!(parse_custom(&serde_json::json!({"name": "x"}), "内网").is_none());
         assert!(parse_custom(&serde_json::json!({"url": "https://e/x.exe"}), "内网").is_none());
+    }
+
+    /// End-to-end guard for the generated feed: a future change to the
+    /// custom-source field names must not silently turn the whole Scoop list
+    /// into zero cards. The artifact is optional in a fresh checkout.
+    #[test]
+    fn generated_scoop_feed_maps_onto_the_app_model() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("dist/scoop-main.json");
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let v: serde_json::Value = serde_json::from_str(&text).expect("feed must be valid JSON");
+        let arr = v["apps"].as_array().expect("feed must contain apps[]");
+        let parsed: Vec<App> = arr
+            .iter()
+            .filter_map(|item| parse_custom(item, "Scoop"))
+            .collect();
+        assert_eq!(parsed.len(), arr.len(), "some feed rows were dropped");
+        assert!(parsed.len() > 1000, "feed is unexpectedly small");
+        assert!(
+            parsed.iter().filter(|a| a.hash.is_some()).count() > 1000,
+            "digests must reach the model"
+        );
+        assert!(parsed.iter().all(|a| a.category.is_some()));
+    }
+
+    #[test]
+    fn generated_store_feed_rows_are_lazy_links() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("dist/msstore-wpm.json");
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let v: serde_json::Value = serde_json::from_str(&text).expect("feed must be valid JSON");
+        let arr = v["apps"].as_array().expect("feed must contain apps[]");
+        let parsed: Vec<App> = arr
+            .iter()
+            .filter_map(|item| parse_custom(item, "微软商店"))
+            .collect();
+        assert_eq!(parsed.len(), arr.len(), "some feed rows were dropped");
+        assert!(parsed.len() > 50, "feed is unexpectedly small");
+        assert!(parsed.iter().all(App::is_lazy_link));
+        assert!(parsed.iter().all(|a| a.download_url().starts_with("ms:")));
     }
 
     #[test]
@@ -1365,6 +1430,7 @@ mod tests {
             source: Some(source.into()),
             desc: None,
             category: None,
+            hash: None,
         }
     }
 

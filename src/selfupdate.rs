@@ -24,6 +24,8 @@ pub struct Release {
     pub page: String,
     /// Installer asset, when the release publishes one.
     pub asset: Option<String>,
+    /// Asset digest from the GitHub API, when the release publishes one.
+    pub hash: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -44,6 +46,8 @@ struct Asset {
     name: String,
     #[serde(default)]
     browser_download_url: String,
+    #[serde(default)]
+    digest: String,
 }
 
 pub fn current() -> &'static str {
@@ -80,7 +84,7 @@ pub fn check() -> Result<Option<Release>, String> {
         return Ok(None);
     }
     // Prefer the MSI: it upgrades in place and shows up in "应用和功能".
-    let asset = api
+    let pick = api
         .assets
         .iter()
         .find(|a| a.name.to_ascii_lowercase().ends_with(".msi"))
@@ -89,8 +93,9 @@ pub fn check() -> Result<Option<Release>, String> {
                 .iter()
                 .find(|a| a.name.to_ascii_lowercase().ends_with(".exe"))
         })
-        .filter(|a| !a.browser_download_url.is_empty())
-        .map(|a| a.browser_download_url.clone());
+        .filter(|a| !a.browser_download_url.is_empty());
+    let asset = pick.map(|a| a.browser_download_url.clone());
+    let hash = pick.and_then(|a| crate::hash::normalize(&a.digest));
     Ok(Some(Release {
         version: api.tag_name.trim_start_matches(['v', 'V']).to_string(),
         summary: api
@@ -103,6 +108,7 @@ pub fn check() -> Result<Option<Release>, String> {
             .to_string(),
         page: api.html_url,
         asset,
+        hash,
     }))
 }
 

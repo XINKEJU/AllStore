@@ -248,6 +248,9 @@ pub fn normalize(s: &str) -> String {
 
 /// Conservative name match: exact after normalization, or a contained name
 /// that is long enough to avoid short-name false positives.
+/// Kept for tests; production callers normalize once and use
+/// [`matches_normalized`] directly.
+#[cfg(test)]
 pub fn name_matches(shop: &str, local: &str) -> bool {
     matches_normalized(&normalize(shop), &normalize(local))
 }

@@ -32,8 +32,8 @@ pub struct LibRow {
     pub publisher: String,
     pub launch: Option<PathBuf>,
     pub uninstall: Option<String>,
-    /// Set when the store catalog knows a newer build: (download url, version).
-    pub update: Option<(String, String)>,
+    /// Set when the store catalog knows a newer build: (url, version, sha256).
+    pub update: Option<(String, String, Option<String>)>,
 }
 
 impl AppState {
@@ -41,9 +41,16 @@ impl AppState {
     /// Called on page entry and on "刷新"; the registry walk is the only I/O.
     pub fn rebuild_library(&mut self) {
         let apps = self.inventory.apps();
+        // Normalize the catalog once for the whole page; doing it per row
+        // meant ~150 × 850 string pairs allocated on every entry to "我的软件".
+        let catalog_norm: Vec<String> = self
+            .update_catalog
+            .iter()
+            .map(|a| installed::normalize(&a.name))
+            .collect();
         let mut rows = Vec::with_capacity(apps.len());
         for a in apps {
-            rows.push(lib_row(a, &self.update_catalog));
+            rows.push(lib_row(a, &self.update_catalog, &catalog_norm));
         }
         self.lib_rows = rows;
     }
@@ -224,7 +231,7 @@ impl AppState {
             if !row.publisher.trim().is_empty() {
                 meta.push(row.publisher.clone());
             }
-            if let Some((_, latest)) = &row.update {
+            if let Some((_, latest, _)) = &row.update {
                 meta.push(format!("可更新到 {}", latest));
             }
             self.gfx.text(
@@ -385,10 +392,10 @@ pub(crate) fn apply(st: &mut AppState, kind: u8, i: usize) {
             }
         }
         HIT_LIB_UPDATE => {
-            let Some((url, latest)) = row.update.clone() else {
+            let Some((url, latest, hash)) = row.update.clone() else {
                 return;
             };
-            let id = st.new_download(&row.name, &url, None);
+            let id = st.new_download(&row.name, &url, None, hash);
             st.start_task(id);
             st.status = format!("开始下载 {} {} 的安装包…", row.name, latest);
         }
@@ -421,13 +428,18 @@ fn run_uninstaller(cmd: &str) -> Result<(), String> {
 }
 
 /// Best matching catalog entry for a local app, if it is strictly newer.
-fn best_update(catalog: &[crate::model::App], local: &Installed) -> Option<(String, String)> {
+fn best_update(
+    catalog: &[crate::model::App],
+    catalog_norm: &[String],
+    local: &Installed,
+) -> Option<(String, String, Option<String>)> {
+    let local_norm = installed::normalize(&local.name);
     let mut best: Option<&crate::model::App> = None;
-    for a in catalog {
+    for (a, n) in catalog.iter().zip(catalog_norm) {
         let Some(v) = a.version.as_deref() else {
             continue;
         };
-        if v.trim().is_empty() || !installed::name_matches(&a.name, &local.name) {
+        if v.trim().is_empty() || !installed::matches_normalized(n, &local_norm) {
             continue;
         }
         let better = best
@@ -442,17 +454,17 @@ fn best_update(catalog: &[crate::model::App], local: &Installed) -> Option<(Stri
     if !installed::is_newer(&latest, &local.version) {
         return None;
     }
-    Some((a.download_url(), latest))
+    Some((a.download_url(), latest, a.hash.clone()))
 }
 
-fn lib_row(a: &Installed, catalog: &[crate::model::App]) -> LibRow {
+fn lib_row(a: &Installed, catalog: &[crate::model::App], catalog_norm: &[String]) -> LibRow {
     LibRow {
         name: a.name.clone(),
         version: a.version.clone(),
         publisher: a.publisher.clone().unwrap_or_default(),
         launch: installed::launch_path(a),
         uninstall: a.uninstall.clone(),
-        update: best_update(catalog, a),
+        update: best_update(catalog, catalog_norm, a),
     }
 }
 
@@ -489,12 +501,16 @@ mod tests {
             version: "1.0".into(),
             ..Default::default()
         };
+        let norm: Vec<String> = catalog
+            .iter()
+            .map(|a| installed::normalize(&a.name))
+            .collect();
         assert_eq!(
-            best_update(&catalog, &newer),
-            Some(("https://cdn/x.exe".to_string(), "3.9.10".to_string()))
+            best_update(&catalog, &norm, &newer),
+            Some(("https://cdn/x.exe".to_string(), "3.9.10".to_string(), None,))
         );
-        assert!(best_update(&catalog, &same).is_none());
-        assert!(best_update(&catalog, &unknown).is_none());
+        assert!(best_update(&catalog, &norm, &same).is_none());
+        assert!(best_update(&catalog, &norm, &unknown).is_none());
     }
 
     #[test]

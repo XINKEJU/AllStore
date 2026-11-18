@@ -432,7 +432,7 @@ pub(crate) fn apply(st: &mut AppState, kind: u8, idx: usize) {
             match rel.asset {
                 Some(url) => {
                     let name = format!("AllStore {}", rel.version);
-                    let id = st.new_download(&name, &url, None);
+                    let id = st.new_download(&name, &url, None, rel.hash.clone());
                     st.start_task(id);
                     st.status = format!("已把 AllStore {} 加入下载队列", rel.version);
                     st.mode = crate::app::Mode::Downloads;

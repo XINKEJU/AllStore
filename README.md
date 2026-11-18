@@ -2,11 +2,22 @@
 
 <img src="assets/icon.png" width="96" alt="AllStore icon">
 
-> **AllStore**（原 MindosShop）—— 聚合联想、腾讯与 GitHub 三个来源的原生 Windows 软件商店，851 款应用，单文件 828 KB。
+> **AllStore**（原 MindosShop）—— 聚合联想、腾讯与 GitHub 三个内置来源的原生 Windows 软件商店，851 款应用，单文件 847 KB；可再接入微软商店 Win32 与 Scoop 社区源。
 
-一个纯净、轻量的原生 Windows 应用商店客户端。以联想应用商店、腾讯软件中心的公开内容接口与 GitHub Release 作为数据源（可再加自定义 JSON 源），但**不含**广告、运营位、捆绑推荐、热搜推广词与遥测上报。
+一个纯净、轻量的原生 Windows 应用商店客户端。以联想应用商店、腾讯软件中心的公开内容接口与 GitHub Release 作为数据源（可再加自定义 JSON 源、微软商店 Win32 与 Scoop 社区源），但**不含**广告、运营位、捆绑推荐、热搜推广词与遥测上报。
 
-当前版本：**0.14.2**
+当前版本：**0.14.3**
+
+## 0.14.3：完整性校验、社区源与交互升级
+
+这一版把「下载可信」和「源覆盖」补齐，同时把交互从可用做成顺手：
+
+- **SHA-256 完整性校验**：来源给出摘要时（Scoop 清单、自定义 JSON 的 `hash` / `sha256`、GitHub Release asset digest、微软商店清单的 `InstallerSha256`）在落盘后逐字节校验，失败即删除残包并明确报错；摘要贯穿断点续传与重启，不因商店换版本而过期
+- **微软商店 Win32 源**：`ms:PRODUCTID` 惰性解析，下载时才向 StoreEdgeFD 的 `packageManifests` 要真实 exe/msi 地址；只收非打包 Win32 条目，MSIX/APPX 自动跳过，零新增依赖（+3.5 KB）
+- **Scoop 社区源**：`tools/convert_scoop.py` 把 Main / Extras / Versions 三个 bucket 合并转成 AllStore 格式，去重后 4829 款应用、94% 带 SHA-256，客户端零改动
+- **死链判定收紧**：只有 404/410 判死；403/405/429/5xx/超时改走 `GET Range: bytes=0-0` 复核，CDN 拒绝 HEAD 不再让软件从分类页消失；假 200 由摘要与文件头校验兜底
+- **交互升级**：卡片交错入场、侧栏弹性胶囊、滚轮/键盘平滑滚动、Home/End/PageUp/PageDown 翻页、状态提示淡入（细节见下节）
+- **错误逻辑修正**：切源时旧目录响应不会再覆盖新源（DATA 消息带 epoch）；设置页 Esc 退出后输入框不再吞按键；窗口激活时的注册表扫描移到后台线程，Alt-Tab 不再卡顿
 
 ## 界面与动效升级（0.14.2）
 
@@ -18,6 +29,11 @@
 - **侧边栏选中指示**：由一个可滑动的胶囊块代替逐行跳变的高亮，切换分类时平滑移动；进入工具页时淡出
 - **视觉层次**：标题栏、侧边栏、状态栏改为纵向渐变加细分割线；首页与详情 Hero、主按钮使用渐变和投影；卡片、下载图表卡、空态卡与设置卡片统一加柔和阴影
 - **按需刷新**：新增 16 ms 动画定时器，只在过渡进行时启动，结束后自动关闭，空闲时不占 CPU
+- **交错入场（本轮新增）**：卡片按索引错开 28 ms（封顶 280 ms）依次上浮 16 px，阴影同步渐显；首次目录加载与每次切页都会重放，视觉上是一小段波浪而不是整屏硬切
+- **弹性导航（本轮新增）**：侧边栏胶囊从指数缓动改为阻尼弹簧（刚度 210 / 阻尼 23），带一点克制的过冲；有收敛测试保证 300 帧内必定停下，不会让动画时钟永远空转
+- **平滑滚动（本轮新增）**：滚轮与键盘只写目标值，16 ms 时钟把位置缓动过去；小数余量单独保存，短距离滚动不会因四舍五入而卡住。命中测试与绘制始终读同一个 `scroll`，不会出现「看着在这、点到那」
+- **键盘翻页（本轮新增）**：Home / End 直达首尾，PageUp / PageDown 每次 480 px，全部复用同一缓动目标
+- **状态提示淡入（本轮新增）**：后台线程送来的状态文字从底色淡入并上滑 4 px，下载开始 / 完成 / 目录刷新时不再瞬间跳出
 
 ## 界面整理（0.14.1）
 
@@ -33,7 +49,7 @@
 这一版补齐了「装在企业网里也能用」和「不用改配置文件」两件事：
 
 - **系统代理真正生效**：读取 Windows / IE 的代理设置（静态代理、PAC 脚本、自动检测），通过 `WINHTTP_OPTION_PROXY` 作用到每条请求上；PAC 结果按 URL 缓存一分钟，避免每个下载分片都去求值脚本。代理认证失败（407）或网关不可达（502/504）时**自动回退直连**再试一次，企业网里常见的「本应用没网」就此消失
-- **下载前查空间、下载后校验**：拿到响应头即可算出所需空间（含 64 MB 余量）并与临时目录所在卷的可用空间比较，空间不够时立刻停止而不是下到一半报 `os error 112`；落盘后再次核对文件长度与 PE / MSI / ZIP 文件头，损坏的包不会再被当成安装程序启动
+- **下载前查空间、下载后校验**：拿到响应头即可算出所需空间（含 64 MB 余量）并与临时目录所在卷的可用空间比较，空间不够时立刻停止而不是下到一半报 `os error 112`；落盘后再次核对文件长度与 PE / MSI / ZIP 文件头，损坏的包不会再被当成安装程序启动；来源提供 SHA-256 时（Scoop 清单、微软商店清单、自定义 JSON、GitHub Release asset digest）再逐字节校验摘要，不一致就丢弃文件且不切换源重试
 - **安装器异步等待**：改用 `ShellExecuteExW` + `SEE_MASK_NOCLOSEPROCESS`，后台线程等到安装器真正退出后才重扫卸载项注册表——安装了新版本，更新列表会自己把这一项去掉，而不是仍显示「可更新」
 - **设置页**：侧边栏底部的齿轮可打开设置页，可开关三个内置源、添加最多 8 个自定义 JSON 源、选择下载目录（系统文件夹选择器）、设置同时下载数（1/2/3/5）与主题（跟随系统 / 浅色 / 深色）。改动保存到 `%LOCALAPPDATA%\AllStore\sources.json`（临时文件 + 改名，避免半截写入），源变化会立即重新聚合
 - **应用自更新**：启动时静默检查 GitHub Release，发现比当前版本新的 tag 时在「设置 → 关于」提示，并可直接把 MSI 加入下载队列或打开发布页；**不静默替换自身**
@@ -58,7 +74,7 @@
 
 | | 原版（剪枝后） | AllStore |
 |---|---|---|
-| 交付体积 | 234.9 MB | **828 KB（单 exe，静态 CRT）** |
+| 交付体积 | 234.9 MB | **847 KB（单 exe，静态 CRT）** |
 | 进程数 | 5 | **1** |
 | 窗口 | CEF 浏览器壳 | **真 HWND** |
 | 运行时 | CEF + 124 版 Chromium | **无（仅系统 DLL）** |
@@ -79,9 +95,9 @@
 
 | 产物 | 体积 | 说明 |
 |---|---|---|
-| `AllStore-0.14.2-x64.msi` | 1.10 MB | 用户级安装包，**不弹 UAC** |
-| `AllStore-0.14.2-windows-x64.zip` | 0.42 MB | 便携包：exe + LICENSE + 说明 |
-| `AllStore-0.14.2-windows-x64.exe` | 0.81 MB | 裸 exe，双击即用 |
+| `AllStore-0.14.3-x64.msi` | 1.11 MB | 用户级安装包，**不弹 UAC** |
+| `AllStore-0.14.3-windows-x64.zip` | 0.43 MB | 便携包：exe + LICENSE + 说明 |
+| `AllStore-0.14.3-windows-x64.exe` | 0.83 MB | 裸 exe，双击即用 |
 
 MSI 用 WiX v5 构建（`installer/allstore.wxs`，`tools/build_msi.ps1` 一条命令出全套）：
 
@@ -100,7 +116,7 @@ MSI 用 WiX v5 构建（`installer/allstore.wxs`，`tools/build_msi.ps1` 一条�
 | 窗口 | `CreateWindowExW` + 消息循环，DWM Mica / 沉浸式暗色，最小窗口尺寸约束，per-monitor DPI v2 |
 | 渲染 | Direct2D 硬件加速 + **DirectWrite TextLayout 实测排版** + WIC 解码图标；画刷/文本布局/行高缓存、单行省略号裁剪、图标 LRU 预缩放、轴对齐裁剪、设备丢失自动重建 |
 | 网络 | WinHTTP（复用系统 TLS 根证书与系统代理），显式处理 HTTP 状态码与重定向；图标下载的 6 线程固定工作池 |
-| 数据 | serde_json，仅解析白名单内容接口；多源聚合（联想 / 腾讯 / GitHub / 自定义 JSON）统一映射为同一模型；HTML 简介统一清洗为纯文本 |
+| 数据 | serde_json，仅解析白名单内容接口；多源聚合（联想 / 腾讯 / GitHub / 微软商店 WPM / 自定义 JSON）统一映射为同一模型；HTML 简介统一清洗为纯文本 |
 | 下载 | 独立任务队列（`downloads.rs`）：流式写盘、实时进度、网络/写盘双路速度、36 秒柱状图 + 趋势折线、暂停/继续、Range 断点续传、任务落盘、3 并发调度 + 自动重试退避、打开所在文件夹 |
 | 更新 | 读取卸载项注册表 + **本地**比对商店目录版本（`installed.rs` / `update.rs`），目录快照缓存 + 进入页面/激活窗口时自动重扫描 |
 | 并发 | `std::thread` + `PostMessage`，请求带序号以丢弃过期响应 |
@@ -117,7 +133,8 @@ MSI 用 WiX v5 构建（`installer/allstore.wxs`，`tools/build_msi.ps1` 一条�
 | 联想 | token 内容 API（原有） | 有简介、评分、安装量，也是唯一有详情接口的源 |
 | 腾讯 | 公开 JSON `softlistcgi.php` | 免 token，18 个分类各取热门 28 款，直链走 `webcdn.m.qq.com` 并实测支持 `Range` |
 | GitHub | Release 页 / REST API（0.10.0 新增） | 开源软件货架，121 款全部实测有 `.exe` / `.msi`，链接在点下载时才解析 |
-| 自定义 | 任意 HTTPS JSON 数组 | 内网分发 / 自建目录，字段 `name` `version` `url` `size` `logo` `desc` |
+| 微软商店 WPM | `storeedgefd.dsx.mp.microsoft.com/v9.0/packageManifests/{id}`（可选） | 非打包 Win32 应用；目录只存 `ms:PRODUCTID`，点下载时才解析安装包与 SHA-256，MSIX/APPX 自动跳过 |
+| 自定义 | 任意 HTTPS JSON 数组 | 内网分发 / 自建目录，字段 `name` `version` `url` `size` `logo` `desc` `category`，可选 `hash` / `sha256`（64 位十六进制，落盘后校验）；`url` 也可写 `ms:PRODUCTID` |
 
 - 合并时按归一化名称去重（保留元数据更全的那条），实测 **联想 + 腾讯 + GitHub = 851 款应用**（联想 341 / 腾讯 395 / GitHub 115，重名的 6 款并入联想行），上一版单源为 246 款
 - 横幅内新增来源标签：`全部源 / 联想 / 腾讯 / GitHub / …`，点击即按源过滤（纯内存，不发请求）；进入某个分类时若该分类只有联想数据，筛选自动回到「全部源」而不是空白页
@@ -131,6 +148,26 @@ MSI 用 WiX v5 构建（`installer/allstore.wxs`，`tools/build_msi.ps1` 一条�
   "custom": [{ "name": "我的内网源", "url": "https://example.com/apps.json" }]
 }
 ```
+
+**Scoop 社区源（可选，无需改客户端）**：`tools/convert_scoop.py` 把 Scoop 清单转换成上面的自定义源格式，分类映射到侧边栏已有词表，并原样保留清单里的 SHA-256。已生成 `dist/scoop-main.json`：**1714 款应用 / 549 KB，其中 1610 款带摘要**；把该文件托管到任意可直链的静态空间（GitHub Pages / Gitee Pages / 对象存储），在「设置 → 自定义源」填入 URL 即可。抽样 HEAD 探测 120 个下载地址，114 个可用（95%），其余多为已下架的版本。脚本也支持本地清单、多 bucket 与可选死链探测：
+
+```powershell
+python tools\convert_scoop.py --repo Main --repo Extras --out scoop.json
+python tools\convert_scoop.py --bucket-dir ..\Main\bucket --head-check --out scoop.json
+```
+
+注意：Scoop 包多为便携式压缩包，AllStore 会把它们下载并校验后放进 `Downloads`；点「安装」等同在资源管理器双击，未必会出现安装向导。这一步只是把社区目录接进来，不改变程序「不静默安装」的原则。
+
+**微软商店 Win32 源（可选，无需 SDK / token）**：本机实测商店的 `search`、`products`、`packageManifests` 三个接口均返回 HTTP 200，仅需普通 `WindowsStore/…` User-Agent。只接 `Installer.Type = WPM` 的非打包应用（真 `.exe` / `.msi`）；`WindowsUpdate` 那类是 MSIX/APPX，下载得到但无法用 ShellExecute 启动，已被解析器排除。清单里的 `ms:PRODUCTID` 是惰性链接——版本、下载地址与 `InstallerSha256` 都在点下载时读取，所以不会像硬编码直链那样过期，摘要直接接入已有的 SHA-256 校验。`tools/convert_msstore.py` 已生成 `dist/msstore-wpm.json`：**119 款应用 / 60 KB，全部带图标和简介**；同样托管后填进「设置 → 自定义源」即可。实测解析 VLC 得到 `vlc-3.0.23-win64.exe` 与 64 位摘要，与独立抓取的清单逐字一致。
+
+```powershell
+python tools\convert_msstore.py --out msstore.json
+python tools\convert_msstore.py --queries-file names.txt --fetch-versions --out msstore.json
+```
+
+代码侧只有 `src/msstore.rs` 一个解析模块，没有新增 crate：发布体积从 858,624 增至 862,208 字节（**+3.5 KB**）。
+
+**华为 / 荣耀 PC 应用市场：实测后不接入**。华为应用市场 Windows 版本质是「移动应用引擎」，分发 APK / 快应用，且只支持特定 MateBook 机型；网页目录接口（`web-drcn.hispace.dbankcloud.com/edge/uowap/index?method=internal.getTabDetail`，`serviceType=20` 即 PC 门户）实测返回 `InterfaceCode Verification failed`（HTTP 403），需要请求签名；公开的 AGD API 是开发者上传 / 推广侧，要 `client_id` + Access Token，且只能申请自己应用的临时链接。荣耀没有独立的 PC 应用市场网页或域名，所谓「应用推荐」内嵌在荣耀电脑管家中；其 Publish-API 同样是 Android 应用上架侧（需密钥、产物 APK）。两家官网页面也都没有可直接抓取的 Win32 安装包直链。**结论**：即使拿到数据，产物是 APK，AllStore 的 ShellExecute 安装链路装不了，接进来只会增加死卡。若日后拿到厂商正式提供的目录 JSON / 清单，`tools/convert_scoop.py` 的输出格式就是现成模板，填进「设置 → 自定义源」即可，无需改客户端。
 
 **来源筛选看得见（0.9.1）**：0.9.0 的来源标签只写名字，而且合并后的目录是「联想全量 + 腾讯全量」直接拼接，所以第一屏在「全部源」和「联想」下完全一样，看起来像点了没反应。现在：
 
@@ -174,12 +211,12 @@ MSI 用 WiX v5 构建（`installer/allstore.wxs`，`tools/build_msi.ps1` 一条�
 
 所以不存在「换个更新的接口就能拿到活链」这条捷径，可行的根本解法只有一条：**不再相信源给的地址，自己把每一行修好**。
 
-- 启动时对聚合目录里**尚未探过**的直链发 `HEAD`（12 个 worker 并发），结果写入 `%LOCALAPPDATA%\AllStore\urlcheck.json`（24 小时内复用，7 天后清理），第二次启动不再探测
+- 启动时对聚合目录里**尚未探过**的直链发 `HEAD`（12 个 worker 并发），结果写入 `%LOCALAPPDATA%\AllStore\urlcheck.json`（24 小时内复用，7 天后清理），第二次启动不再探测；HEAD 给出非 2xx 时用 `GET Range: bytes=0-0` 复核（首块即中止，不会把探测变成整包下载）
 - 判定为死链的行**不再直接删除**：腾讯行拿软件名去其他源搜同款，命中就把 `dl_a` 换成可用链接，名称 / 图标 / 分类 / 简介全部保留；联想行则清掉厂商自己的失效链接，回落到商店按 `softid` 现签的 `dlservice` 地址。两条都是「就地修好」，目录广度一点不损失
 - 修好的映射写入 `%LOCALAPPDATA%\AllStore\mirrors.json`（14 天有效），所以只有**首次启动**要付一次代价（实测探测 7.1 s + 换源 4.3 s，8 并发），之后秒开
 - 实测：243 条死链 **243 条修好、0 条被丢弃**；首页从 575 款回到 **736 款**（联想 341 / 腾讯 395），微信、腾讯QQ、TIM 等重新上架且可下载
 - 万一仍然漏网（探测通过但下载时已失效），下载失败会自动去其他源搜同名软件换直链重试**一次**；换源后再失败就是终态，不会在源之间来回弹
-- 判「链接已死」不只认 HTTP 4xx/5xx：`无法解析域名` / `无法连接` / `超时` / `连接被中断` 同样算死链——腾讯那批老对象里 DNS 失败与对象删除混在一起，只按状态码判断会漏掉一大半
+- **只有明确的 404 / 410 才判死**（HEAD 或 GET 复核均可）；403 / 405 / 429 / 5xx 与 `无法解析域名` / `无法连接` / `超时` 一律**保留卡片**——很多 CDN 对 HEAD 返回 405 或 403，旧版「非 2xx 即死」会让正常软件从分类页凭空消失。真到下载时才失败的，由换源重试与可读错误文案兜底；服务器返回假 200（HTML 页面）则由 SHA-256 / 文件头校验拦截
 - 失败行的文案改成能看懂的短句：`下载地址已失效（HTTP 404）` / `下载被拒绝（HTTP 403），该地址可能需要登录或限制地区` / `下载服务器暂时不可用（HTTP 5xx）`，不再把 CDN 返回的 `{"errorcode":-46628,…}` 原样贴进列表
 - `%TEMP%\allstore.log` 里可查 `REPAIR probed=/dead=/rehomed=/dropped=`、`HTTP HEAD … status=404` 与 `DL start` / `DL first chunk` 三类行，定位「到底哪一步没走通」
 
@@ -366,10 +403,10 @@ MSI 用 WiX v5 构建（`installer/allstore.wxs`，`tools/build_msi.ps1` 一条�
 - 应用卡片：官方图标、名称、简介、评分、大小、安装量
 - 详情页：大图标、完整简介、本次更新、版本 / 大小 / 安装量 / 开发者、可滚动正文
 - **下载中心**：实时进度条 / 百分比 / 速度、取消、重试、打开所在文件夹、清空记录
-- 下载安装：WinHTTP 流式写盘到 `Downloads`，临时包与签名校验
+- 下载安装：WinHTTP 流式写盘到 `Downloads`，临时包 + PE / MSI / ZIP 文件头校验（拒绝伪装成安装包的 HTML）
 - **软件更新**：左侧「软件更新」页，支持检查更新 / 单个更新 / 全部更新 / 忽略；版本号分段比较（忽略构建标记误报）、同名取最新版本、中英文名称归一化匹配、结果缓存；安装完新版本自动从待更新列表移除
 - **实时速度图**：下载管理页顶部 36 秒窗口，网络 / 写盘瞬时柱状图 + 平滑趋势折线、峰值与累计传输量
-- **多源聚合**：联想 / 腾讯 / 自定义 JSON 源合并去重，横幅来源标签一键筛选
+- **多源聚合**：联想 / 腾讯 / GitHub / 微软商店 WPM / 自定义 JSON 源合并去重，横幅来源标签一键筛选
 - **断点续传**：暂停 / 继续、重启后从残包继续、失败自动重试（2 次退避）
 - **我的软件**：列出全部已安装软件，支持打开 / 定位 / 卸载 / 一键更新
 - **设置页**：内置源开关、自定义 JSON 源（最多 8 个）、下载目录、同时下载数（1/2/3/5）、主题（跟随系统 / 浅色 / 深色），改完即存、立即生效
@@ -386,8 +423,8 @@ MSI 用 WiX v5 构建（`installer/allstore.wxs`，`tools/build_msi.ps1` 一条�
 cargo build --release
 # 产物：target\release\allstore.exe（图标与版本信息由 build.rs 写入）
 
-cargo test                           # 84 个单元测试（布局几何、文本测量、搜索光标、速度采样、更新重扫描、多源聚合、GitHub 选包、代理与磁盘检查、版本比较、解析回归）
-cargo test -- --ignored --nocapture  # 8 个联网冒烟测试（302 / 真实下载 / 进度头 / 断点续传 / 腾讯源 / 多源合并 / 更新匹配）
+cargo test                           # 108 个单元测试（布局几何、文本测量、搜索光标、速度采样、更新重扫描、多源聚合、GitHub 选包、微软商店清单选包、死链判定、弹簧收敛与滚动夹取、代理与磁盘检查、SHA-256 向量与摘要校验、版本比较、解析回归）
+cargo test -- --ignored --nocapture  # 13 个联网冒烟测试（302 / 真实下载 / 进度头 / 断点续传 / 腾讯源 / 多源合并 / 更新匹配 / 商店清单解析 / Range 兜底探测）
 cargo clippy --all-targets           # 零警告
 cargo fmt --check
 
@@ -405,7 +442,7 @@ powershell -File tools\build_msi.ps1
 
 ## 安装
 
-**MSI（推荐）**：双击 `AllStore-0.14.2-x64.msi`，向导装完即可。用户级安装、不需要管理员权限，装到：
+**MSI（推荐）**：双击 `AllStore-0.14.3-x64.msi`，向导装完即可。用户级安装、不需要管理员权限，装到：
 
 ```
 %LOCALAPPDATA%\AllStore\allstore.exe
@@ -413,7 +450,7 @@ powershell -File tools\build_msi.ps1
 
 同时创建开始菜单与桌面快捷方式、「添加或删除程序」卸载项（带图标），升级时原地替换旧版本。`installer\PORTABLE.txt` 与 MSI 的许可页都写清了它只装 exe、不装服务、不设自启。
 
-**便携包**：解压 `AllStore-0.14.2-windows-x64.zip` 直接双击 `AllStore.exe`，不写任何注册表；也可以运行包里的 `install.ps1` 补一个开始菜单入口（脚本还会顺手清掉旧 MindosShop 的快捷方式与卸载项）。
+**便携包**：解压 `AllStore-0.14.3-windows-x64.zip` 直接双击 `AllStore.exe`，不写任何注册表；也可以运行包里的 `install.ps1` 补一个开始菜单入口（脚本还会顺手清掉旧 MindosShop 的快捷方式与卸载项）。
 
 程序不写注册表配置、不驻留服务、不设开机自启；状态只落在 `%LOCALAPPDATA%\AllStore\*.json`。exe 未做代码签名，首次运行若被 SmartScreen 拦截，点「更多信息 → 仍要运行」。
 

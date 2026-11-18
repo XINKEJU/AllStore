@@ -1,6 +1,8 @@
 /target/
 /evidence/
-/dist/
+/dist/*
+!/dist/scoop-main.json
+!/dist/msstore-wpm.json
 *.pyc
 *.log
 *.pdb
@@ -18,3 +20,7 @@ node_modules/
 !/tools/verify_github.py
 # Icon recipe (Pillow) — ships with the source, unlike the ad-hoc helpers.
 !/tools/make_icon.py
+# Scoop bucket converter — the recipe behind dist/scoop-main.json.
+!/tools/convert_scoop.py
+# Microsoft Store (WPM) converter — the recipe behind dist/msstore-wpm.json.
+!/tools/convert_msstore.py

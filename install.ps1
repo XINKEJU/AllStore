@@ -89,7 +89,7 @@ if (-not $NoShortcut) {
 $reg = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AllStore"
 New-Item -Path $reg -Force | Out-Null
 # The bundle may ship a VERSION file; source checkouts fall back to Cargo.toml.
-$version = "0.11.0"
+$version = "0.14.3"
 $verFile = Join-Path $PSScriptRoot "VERSION"
 if (Test-Path -LiteralPath $verFile) {
     $v = (Get-Content -LiteralPath $verFile -Raw).Trim()

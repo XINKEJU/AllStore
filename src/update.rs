@@ -23,6 +23,9 @@ pub struct UpdateItem {
     pub size: Option<String>,
     pub logo: Option<String>,
     pub url: String,
+    /// Digest advertised by the source, if any. Absent in older caches.
+    #[serde(default)]
+    pub hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -134,15 +137,29 @@ pub fn rescan_with(catalog: &[App], local: &[Installed], ignored: &[String]) -> 
 pub fn match_updates(catalog: &[App], local: &[Installed]) -> Vec<UpdateItem> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    for l in local {
+    // Normalizing both names on every comparison would allocate ~255k short
+    // strings for 150 installed apps × 850 catalog rows on the UI thread each
+    // time the update list is rebuilt. Normalize once per row and use the
+    // allocation-free comparator instead; the rule is identical.
+    let local_norm: Vec<String> = local
+        .iter()
+        .map(|l| installed::normalize(&l.name))
+        .collect();
+    let catalog_norm: Vec<String> = catalog
+        .iter()
+        .map(|a| installed::normalize(&a.name))
+        .collect();
+    for (li, l) in local.iter().enumerate() {
         // The catalog can contain several entries for one product; pick the
         // highest version instead of whichever happens to come first.
         let mut best: Option<&App> = None;
-        for a in catalog {
+        for (ci, a) in catalog.iter().enumerate() {
             let Some(v) = a.version.as_deref() else {
                 continue;
             };
-            if v.trim().is_empty() || !installed::name_matches(&a.name, &l.name) {
+            if v.trim().is_empty()
+                || !installed::matches_normalized(&catalog_norm[ci], &local_norm[li])
+            {
                 continue;
             }
             let better = best
@@ -167,6 +184,7 @@ pub fn match_updates(catalog: &[App], local: &[Installed]) -> Vec<UpdateItem> {
             size: a.size.clone(),
             logo: a.logo_url().map(str::to_string),
             url: a.download_url(),
+            hash: a.hash.clone(),
         });
     }
     out.sort_by(|x, y| x.name.cmp(&y.name));
@@ -196,6 +214,7 @@ pub fn unignore(
             size: None,
             logo: None,
             url: String::new(),
+            hash: None,
         });
     Some(entry)
 }
@@ -285,6 +304,7 @@ mod tests {
                 size: None,
                 logo: None,
                 url: String::new(),
+                hash: None,
             },
             UpdateItem {
                 soft_id: "2".into(),
@@ -294,6 +314,7 @@ mod tests {
                 size: None,
                 logo: None,
                 url: String::new(),
+                hash: None,
             },
         ];
         let restored = unignore(&mut ignored, &mut items, 1).unwrap();

@@ -964,10 +964,59 @@ pub fn details(token: &str, id: &str) -> Result<Detail, String> {
     serde_json::from_value::<Detail>(data).map_err(|e| e.to_string())
 }
 
+/// Raw status of one probe, following redirects. A non-2xx is a *result*, not
+/// an error here: the caller decides which codes really mean "file is gone".
+/// Range requests abort after the first chunk so a server that ignores
+/// `Range: bytes=0-0` cannot turn a liveness check into a full download.
+fn probe_status(method: &str, url: &str, ranged: bool) -> Option<u32> {
+    let range: Vec<(&str, String)> = if ranged {
+        vec![("Range", "bytes=0-0".into())]
+    } else {
+        Vec::new()
+    };
+    let carry: &[(&str, String)] = &range;
+    let mut current = url.to_string();
+    for _ in 0..6 {
+        let mut stop = |_chunk: &[u8]| -> bool { false };
+        let mut sink: Sink<'_> = Some(&mut stop);
+        let mut meta: MetaSink<'_> = None;
+        let r = match one(method, &current, &[], carry, None, &mut sink, &mut meta) {
+            Ok(r) => r,
+            // Body bytes arrived before the sink aborted — the object exists.
+            Err(e) if e.contains("下载被中止") => return Some(200),
+            Err(_) => return None,
+        };
+        if (300..400).contains(&r.status) {
+            current = resolve_location(&current, &r.location?);
+            continue;
+        }
+        return Some(r.status);
+    }
+    None
+}
+
+/// Only 404/410 are proof that an installer is gone. CDNs answer HEAD with
+/// 403/405/429/5xx (or nothing at all) for perfectly good objects; treating
+/// those as death silently removes working apps from every category page.
+/// A ranged GET is the fallback: if it also says 404/410 the link is dead,
+/// otherwise keep the card and let the downloader report any real failure.
+fn alive_from_statuses(head: Option<u32>, ranged_get: Option<u32>) -> bool {
+    match head {
+        Some(200..=299) => true,
+        Some(404 | 410) => false,
+        _ => !matches!(ranged_get, Some(404 | 410)),
+    }
+}
+
 /// HEAD-probe a download link. Used to hide entries whose CDN object is gone:
 /// the Tencent list API keeps advertising files it has already deleted.
 pub fn url_alive(url: &str) -> bool {
-    http("HEAD", url, &[], None).is_ok()
+    let head = probe_status("HEAD", url, false);
+    let get = match head {
+        Some(200..=299) | Some(404 | 410) => None,
+        _ => probe_status("GET", url, true),
+    };
+    alive_from_statuses(head, get)
 }
 
 /// Fetch a small binary resource (app icon).
@@ -1233,5 +1282,41 @@ mod tests {
         );
         assert!(result.is_err(), "sink abort should surface as an error");
         assert_eq!(&head, b"MZ", "first bytes are not a PE executable");
+    }
+
+    #[test]
+    fn only_explicit_not_found_kills_a_link() {
+        assert!(alive_from_statuses(Some(200), None));
+        assert!(alive_from_statuses(Some(206), None));
+        assert!(!alive_from_statuses(Some(404), None));
+        assert!(!alive_from_statuses(Some(410), None));
+        // HEAD rejected but GET works — the common CDN case.
+        assert!(alive_from_statuses(Some(403), Some(200)));
+        assert!(alive_from_statuses(Some(405), Some(206)));
+        // A 5xx is a temporary outage, not a deleted object.
+        assert!(alive_from_statuses(Some(429), Some(500)));
+        assert!(alive_from_statuses(Some(500), Some(503)));
+        // Transport failure on HEAD must not hide a reachable file.
+        assert!(alive_from_statuses(None, Some(200)));
+        assert!(!alive_from_statuses(None, Some(404)));
+        // Both probes inconclusive: keep the row, let download report it.
+        assert!(alive_from_statuses(Some(405), None));
+        assert!(alive_from_statuses(None, None));
+    }
+
+    #[test]
+    #[ignore = "requires live network"]
+    fn live_ranged_probe_aborts_cleanly_on_a_real_cdn() {
+        // The sink aborts on the first chunk; that must still be reported as
+        // a live object rather than a transport error.
+        let status = probe_status(
+            "GET",
+            "https://download.videolan.org/videolan/vlc/3.0.23/win64/vlc-3.0.23-win64.exe",
+            true,
+        );
+        assert!(
+            matches!(status, Some(200..=299)),
+            "probe returned {status:?}"
+        );
     }
 }

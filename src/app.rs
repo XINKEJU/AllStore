@@ -3445,7 +3445,9 @@ impl AppState {
                     let _ = UpdateWindow(self.hwnd);
                 }
                 self.note_frame(started.elapsed());
-                let _ = FRAME_PENDING.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                // `fetch_update` was renamed to `try_update` in Rust 1.100 and
+                // the old name is deprecated, which fails the -D warnings gate.
+                let _ = FRAME_PENDING.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                     Some(v.saturating_sub(1))
                 });
                 Some(LRESULT(0))

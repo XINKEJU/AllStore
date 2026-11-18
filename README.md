@@ -2,7 +2,7 @@
 
 <img src="assets/icon.png" width="96" alt="AllStore icon">
 
-> **AllStore**（原 MindosShop）—— 聚合联想、腾讯与 GitHub 三个内置来源的原生 Windows 软件商店，851 款应用，单文件 877 KB；可再接入微软商店 Win32 与 Scoop 社区源。
+> **AllStore**（原 MindosShop）—— 聚合联想、腾讯与 GitHub 三个内置来源的原生 Windows 软件商店，851 款应用，单文件 887 KB；可再接入微软商店 Win32 与 Scoop 社区源。
 
 一个纯净、轻量的原生 Windows 应用商店客户端。以联想应用商店、腾讯软件中心的公开内容接口与 GitHub Release 作为数据源（可再加自定义 JSON 源、微软商店 Win32 与 Scoop 社区源），但**不含**广告、运营位、捆绑推荐、热搜推广词与遥测上报。
 
@@ -109,7 +109,7 @@
 
 | | 原版（剪枝后） | AllStore |
 |---|---|---|
-| 交付体积 | 234.9 MB | **877 KB（单 exe，静态 CRT）** |
+| 交付体积 | 234.9 MB | **887 KB（单 exe，静态 CRT）** |
 | 进程数 | 5 | **1** |
 | 窗口 | CEF 浏览器壳 | **真 HWND** |
 | 运行时 | CEF + 124 版 Chromium | **无（仅系统 DLL）** |

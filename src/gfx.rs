@@ -214,8 +214,11 @@ pub struct Gfx {
     formats: HashMap<(u32, bool, bool), IDWriteTextFormat>,
     /// Icon-font formats (Segoe MDL2 Assets), one per glyph size.
     icon_fmts: HashMap<u32, IDWriteTextFormat>,
-    /// Palette brushes are created once instead of once per drawn primitive.
-    brushes: HashMap<u32, ID2D1SolidColorBrush>,
+    /// Solid brushes keyed by colour. The palette seeds this map, but any
+    /// colour is created on demand: hover tints and fades pass `with_alpha`,
+    /// and looking only at the pre-seeded palette silently skipped every
+    /// translucent primitive (no hover highlight, no fading pill).
+    brushes: RefCell<HashMap<u32, ID2D1SolidColorBrush>>,
     /// Vertical gradients keyed by the (top, bottom) colour pair. The brush is
     /// created in unit space and transformed per rectangle, so one brush
     /// serves every card / banner of the same palette.
@@ -224,6 +227,11 @@ pub struct Gfx {
     ellipsis: HashMap<(u32, bool), IDWriteInlineObject>,
     line_heights: HashMap<(u32, bool), f32>,
     pub icons: HashMap<String, ID2D1Bitmap>,
+    /// Glyph layouts are shaped once and reused. `icon()` runs for every nav
+    /// row and every card button on every frame, and a fresh
+    /// `CreateTextLayout` per call was a measurable slice of a 240 Hz frame
+    /// budget (4.2 ms) on its own.
+    icon_layouts: HashMap<(u32, u32, u32, u32), TextLayout>,
     /// Insertion order for a real LRU instead of dropping every icon at once.
     icon_order: Vec<String>,
     pub pal: Palette,
@@ -282,12 +290,13 @@ impl Gfx {
                 hwnd,
                 formats: HashMap::new(),
                 icon_fmts: HashMap::new(),
-                brushes,
+                brushes: RefCell::new(brushes),
                 gradients: RefCell::new(HashMap::new()),
                 layouts: HashMap::with_capacity(256),
                 ellipsis: HashMap::new(),
                 line_heights: HashMap::new(),
                 icons: HashMap::new(),
+                icon_layouts: HashMap::new(),
                 icon_order: Vec::new(),
                 pal,
                 scale,
@@ -324,10 +333,10 @@ impl Gfx {
             self.rt.GetDpi(&mut dpi_x, &mut dpi_y);
             self.scale = if dpi_x > 1.0 { dpi_x / 96.0 } else { 1.0 };
             self.pal = palette(self.dark);
-            self.brushes.clear();
+            self.brushes.borrow_mut().clear();
             for c in self.pal.all() {
                 if let Ok(b) = self.rt.CreateSolidColorBrush(&c.d2(), None) {
-                    self.brushes.insert(c.key(), b);
+                    self.brushes.borrow_mut().insert(c.key(), b);
                 }
             }
             self.gradients.borrow_mut().clear();
@@ -369,20 +378,36 @@ impl Gfx {
         }
         self.dark = dark;
         self.pal = palette(dark);
-        self.brushes.clear();
+        self.brushes.borrow_mut().clear();
         self.gradients.borrow_mut().clear();
+        let mut map = self.brushes.borrow_mut();
         for c in self.pal.all() {
             unsafe {
                 if let Ok(b) = self.rt.CreateSolidColorBrush(&c.d2(), None) {
-                    self.brushes.insert(c.key(), b);
+                    map.insert(c.key(), b);
                 }
             }
         }
     }
 
-    /// Borrowed brush: no AddRef/Release per rectangle any more.
-    fn brush(&self, c: Color) -> Option<&ID2D1SolidColorBrush> {
-        self.brushes.get(&c.key())
+    /// Brush for an arbitrary colour. Palette colours are pre-seeded, anything
+    /// else (hover tints, faded pills, shadows) is created on demand and
+    /// cached. Channel values are quantised to 1/64 so an easing animation
+    /// does not mint a new GPU brush on every single frame.
+    fn brush(&self, c: Color) -> Option<ID2D1SolidColorBrush> {
+        let q = |v: f32| (v.clamp(0.0, 1.0) * 64.0).round() / 64.0;
+        let c = Color(q(c.0), q(c.1), q(c.2), q(c.3));
+        if let Some(b) = self.brushes.borrow().get(&c.key()) {
+            return Some(b.clone());
+        }
+        let b = unsafe { self.rt.CreateSolidColorBrush(&c.d2(), None) }.ok()?;
+        let mut map = self.brushes.borrow_mut();
+        // Palette colours are re-created on demand, so a hard reset is safe.
+        if map.len() >= 512 {
+            map.clear();
+        }
+        map.insert(c.key(), b.clone());
+        Some(b)
     }
 
     /// Insert an icon with a bounded LRU. Previously all 200 cached bitmaps
@@ -458,7 +483,7 @@ impl Gfx {
 
     pub fn fill(&self, r: D2D_RECT_F, c: Color) {
         if let Some(b) = self.brush(c) {
-            unsafe { self.rt.FillRectangle(&r, b) };
+            unsafe { self.rt.FillRectangle(&r, &b) };
         }
     }
 
@@ -470,7 +495,7 @@ impl Gfx {
                     radiusX: radius,
                     radiusY: radius,
                 };
-                self.rt.FillRoundedRectangle(&rr, b);
+                self.rt.FillRoundedRectangle(&rr, &b);
             }
         }
     }
@@ -482,7 +507,7 @@ impl Gfx {
                 self.rt.DrawLine(
                     Vector2 { X: x0, Y: y0 },
                     Vector2 { X: x1, Y: y1 },
-                    b,
+                    &b,
                     width,
                     None,
                 );
@@ -492,7 +517,7 @@ impl Gfx {
 
     pub fn outline(&self, r: D2D_RECT_F, c: Color, width: f32) {
         if let Some(b) = self.brush(c) {
-            unsafe { self.rt.DrawRectangle(&r, b, width, None) };
+            unsafe { self.rt.DrawRectangle(&r, &b, width, None) };
         }
     }
 
@@ -726,7 +751,7 @@ impl Gfx {
             self.rt.DrawTextLayout(
                 Vector2 { X: x, Y: y },
                 &t.layout,
-                b,
+                &b,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
             );
         }
@@ -749,16 +774,43 @@ impl Gfx {
         if r.right <= r.left || r.bottom <= r.top {
             return;
         }
-        let Some(f) = self.icon_format(size) else {
+        // Same glyph at the same size in a same-sized box: shape it once. The
+        // rect is rounded because a card slides by whole device pixels and a
+        // sub-pixel change would otherwise miss the cache every frame.
+        let key = (
+            glyph as u32,
+            size,
+            (r.right - r.left).round() as u32,
+            (r.bottom - r.top).round() as u32,
+        );
+        if !self.icon_layouts.contains_key(&key) {
+            let Some(f) = self.icon_format(size) else {
+                return;
+            };
+            let mut buf = [0u16; 2];
+            let units = glyph.encode_utf16(&mut buf);
+            let Ok(l) = (unsafe {
+                self.dwrite
+                    .CreateTextLayout(units, &f, key.2 as f32, key.3 as f32)
+            }) else {
+                return;
+            };
+            if self.icon_layouts.len() >= 256 {
+                self.icon_layouts.clear();
+            }
+            self.icon_layouts.insert(
+                key,
+                TextLayout {
+                    layout: l,
+                    height: key.3 as f32,
+                    width: key.2 as f32,
+                    line_h: 0.0,
+                },
+            );
+        }
+        let Some(l) = self.icon_layouts.get(&key).cloned() else {
             return;
         };
-        let mut buf = [0u16; 2];
-        let units = glyph.encode_utf16(&mut buf);
-        let l = unsafe {
-            self.dwrite
-                .CreateTextLayout(units, &f, r.right - r.left, r.bottom - r.top)
-        };
-        let Ok(l) = l else { return };
         let Some(b) = self.brush(c) else { return };
         unsafe {
             self.rt.DrawTextLayout(
@@ -766,8 +818,8 @@ impl Gfx {
                     X: r.left,
                     Y: r.top,
                 },
-                &l,
-                b,
+                &l.layout,
+                &b,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
             );
         }

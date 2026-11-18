@@ -5,14 +5,14 @@
 use std::collections::{HashSet, VecDeque};
 use std::ffi::c_void;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
-use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
-use windows::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient, ValidateRect};
+use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmFlush, DwmSetWindowAttribute};
+use windows::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient, UpdateWindow, ValidateRect};
 use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
 use windows::Win32::UI::Shell::ITaskbarList3;
@@ -49,10 +49,10 @@ pub const WM_APP_INSTALL_DONE: u32 = 0x8000 + 13;
 pub const WM_APP_SELFUPDATE: u32 = 0x8000 + 14;
 /// Local uninstall-key snapshot collected off the UI thread.
 pub const WM_APP_LOCAL_SCAN: u32 = 0x8000 + 15;
+/// One animation frame, posted by the compositor pacer thread.
+pub const WM_APP_FRAME: u32 = 0x8000 + 16;
 /// Single 500 ms clock for caret blink and speed-graph sampling.
 pub const TIMER_ID: usize = 1;
-/// 60 Hz clock that only exists while an easing transition is still running.
-pub const TIMER_ANIM: usize = 2;
 
 /// A single eased scalar. Values chase their target exponentially, which is
 /// what makes hover, the navigation pill and the page slide feel continuous
@@ -84,7 +84,8 @@ impl Motion {
             self.value = self.target;
             return false;
         }
-        // ~14/s damping: 95% of the distance in ~215 ms at 60 fps.
+        // ~14/s damping: 95% of the distance in ~215 ms, whatever the refresh
+        // rate happens to be (the step is time-based, not per-frame).
         self.value += d * (dt * 14.0).min(1.0);
         true
     }
@@ -119,6 +120,60 @@ static DATA_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// so repeated WM_ACTIVATEAPP messages never pile up work.
 static LOCAL_SCAN_BUSY: AtomicBool = AtomicBool::new(false);
 
+/// True while the compositor pacer thread is alive. Animation frames are
+/// driven by `DwmFlush` rather than `SetTimer`, so the app steps at the
+/// monitor's real refresh rate: 240 fps on a 240 Hz panel, 60 fps on 60 Hz.
+/// A 16 ms timer pinned every display to 60 Hz and made motion look stepped
+/// on high-refresh hardware.
+static PACER_ON: AtomicBool = AtomicBool::new(false);
+
+/// Bumped on every pacer start. A thread only touches `PACER_ON` on exit when
+/// it is still the current generation, so a fast stop/start pair cannot lose
+/// the freshly started pacer to the previous thread's cleanup.
+static PACER_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Frames queued but not painted yet. Two slots let the next vblank be claimed
+/// while the current frame is still painting, which is what keeps a 240 Hz
+/// panel fed: with a single slot, one late paint costs a whole vblank and the
+/// rate collapses toward 120. The cap still bounds the backlog, so input
+/// latency cannot grow without limit.
+static FRAME_PENDING: AtomicU32 = AtomicU32::new(0);
+const MAX_FRAMES_IN_FLIGHT: u32 = 2;
+
+/// Spawn the frame pacer for `hwnd`. Every call starts a fresh generation; the
+/// previous thread notices the generation bump and retires on its own, so a
+/// quick stop/start pair can never leave the window without a live pacer.
+fn start_pacer(hwnd: HWND) {
+    let pacer_id = PACER_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    PACER_ON.store(true, Ordering::SeqCst);
+    FRAME_PENDING.store(0, Ordering::SeqCst);
+    let raw = hwnd.0 as usize;
+    std::thread::spawn(move || {
+        while PACER_ON.load(Ordering::Relaxed) && PACER_GEN.load(Ordering::Relaxed) == pacer_id {
+            // Blocks until the desktop compositor has presented. On a machine
+            // without DWM (RDP session, basic display driver) it fails
+            // immediately, so fall back to a 4 ms nap instead of spinning.
+            if unsafe { DwmFlush() }.is_err() {
+                std::thread::sleep(Duration::from_millis(4));
+            }
+            if !PACER_ON.load(Ordering::Relaxed) || PACER_GEN.load(Ordering::Relaxed) != pacer_id {
+                break;
+            }
+            if FRAME_PENDING.load(Ordering::Relaxed) < MAX_FRAMES_IN_FLIGHT {
+                FRAME_PENDING.fetch_add(1, Ordering::Relaxed);
+                let h = HWND(raw as *mut c_void);
+                if unsafe { PostMessageW(Some(h), WM_APP_FRAME, WPARAM(0), LPARAM(0)) }.is_err() {
+                    FRAME_PENDING.fetch_sub(1, Ordering::Relaxed);
+                    break;
+                }
+            }
+        }
+        if PACER_GEN.load(Ordering::SeqCst) == pacer_id {
+            PACER_ON.store(false, Ordering::SeqCst);
+        }
+    });
+}
+
 /// The windows crate no longer exports this CLSID constant; the value is
 /// stable since Windows 7 ({56FDF344-FD6D-11D0-958A-006097C9A090}).
 const CLSID_TASKBARLIST: GUID = GUID::from_u128(0x56fdf344_fd6d_11d0_958a_006097c9a090);
@@ -132,7 +187,19 @@ pub(crate) const GAP: f32 = 14.0;
 pub(crate) const CARD_W: f32 = 292.0;
 pub(crate) const CARD_H: f32 = 176.0;
 pub(crate) const BTN_H: f32 = 32.0;
-pub(crate) const NAV_ROW_H: f32 = 40.0;
+pub(crate) const NAV_ROW_H: f32 = 48.0;
+/// Height of the clickable pill inside a row; the difference is the gap that
+/// makes consecutive rows read as separate buttons.
+pub(crate) const NAV_ITEM_H: f32 = 40.0;
+/// Vertical space a group header claims above its first row.
+pub(crate) const NAV_GROUP_GAP: f32 = 30.0;
+/// Segoe MDL2 Assets glyphs for the sidebar rows. Checked against the real
+/// font: every code point below resolves to a glyph on Windows 10/11.
+pub(crate) const NAV_GLYPH_HOME: char = '\u{E80F}';
+pub(crate) const NAV_GLYPH_LIBRARY: char = '\u{E82D}';
+pub(crate) const NAV_GLYPH_CATEGORY: char = '\u{E71D}';
+/// Sidebar scroll step per wheel notch, in DIPs.
+const NAV_WHEEL_STEP: f32 = 54.0;
 pub(crate) const ROW_H: f32 = 84.0;
 pub(crate) const HERO_H: f32 = 88.0;
 pub(crate) const MIN_W: i32 = 1000;
@@ -263,6 +330,9 @@ pub struct NavItem {
     pub kind: NavKind,
     /// 0 = 发现, 1 = 管理, 2 = 分类. Group headers are derived from this.
     pub group: u8,
+    /// Segoe MDL2 Assets glyph drawn in front of the label. A row without an
+    /// icon reads as static text; the glyph is what makes it look clickable.
+    pub glyph: char,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -283,6 +353,32 @@ pub enum Field {
     SourceUrl,
 }
 
+/// Precomputed card labels. `html_to_text` and the meta join are pure but not
+/// free; doing them once per catalog change instead of once per frame removes
+/// hundreds of allocations from every hover/scroll animation frame.
+struct CardText {
+    subtitle: String,
+    score: String,
+    price_line: String,
+}
+
+impl CardText {
+    fn new(a: &crate::model::App) -> Self {
+        let score = a.score_text();
+        let meta = a.meta();
+        let price_line = if meta.is_empty() {
+            "免费".to_string()
+        } else {
+            format!("免费  ·  {}", meta)
+        };
+        Self {
+            subtitle: a.subtitle(),
+            score,
+            price_line,
+        }
+    }
+}
+
 pub struct AppState {
     pub hwnd: HWND,
     pub gfx: Gfx,
@@ -292,6 +388,10 @@ pub struct AppState {
     pub nav: Vec<NavItem>,
     pub active_nav: usize,
     pub apps: Vec<App>,
+    /// Card text derived from `apps` (HTML-stripped subtitle, score and meta
+    /// line). Rebuilt only when the visible list changes, so a per-frame paint
+    /// never re-runs `html_to_text` or allocates three Strings per card.
+    card_texts: Vec<CardText>,
     /// Unfiltered result list backing `apps`; switching the source chip only
     /// re-filters this in memory, so no request is issued.
     pub catalog_all: Vec<App>,
@@ -336,6 +436,11 @@ pub struct AppState {
     /// Y of the sliding sidebar selection pill, plus its spring velocity.
     pub nav_pill: Motion,
     nav_pill_v: f32,
+    /// Sidebar list scroll offset. The category list is taller than the pane on
+    /// short windows, so it scrolls on its own instead of dropping rows.
+    nav_scroll: f32,
+    /// Clamp for `nav_scroll`, recomputed every frame from the real pane height.
+    nav_scroll_max: f32,
     /// 1 = a nav row is selected, 0 = a utility page owns the content pane.
     pub nav_pill_vis: Motion,
     /// Page transition progress (0 = entering, 1 = settled).
@@ -344,6 +449,14 @@ pub struct AppState {
     last_mode: Mode,
     last_tick: Instant,
     anim_running: bool,
+    /// Opt-in frame accounting (`ALLSTORE_FRAME_LOG=1`): once a second the log
+    /// gets the real frame rate and paint cost, so "it feels slow" can be
+    /// checked against numbers instead of guessed at.
+    frame_probe: bool,
+    frame_window: Instant,
+    frame_count: u32,
+    frame_total: f32,
+    frame_max: f32,
     pub status: String,
     /// Last painted status text and its fade, so a new line eases in instead
     /// of snapping while the rest of the frame stays still.
@@ -477,6 +590,7 @@ impl AppState {
                     id: "-1".into(),
                     kind: NavKind::Browse,
                     group: 0,
+                    glyph: NAV_GLYPH_HOME,
                 },
                 NavItem {
                     label: "我的软件".into(),
@@ -484,10 +598,12 @@ impl AppState {
                     id: String::new(),
                     kind: NavKind::Library,
                     group: 1,
+                    glyph: NAV_GLYPH_LIBRARY,
                 },
             ],
             active_nav: 0,
             apps: Vec::new(),
+            card_texts: Vec::new(),
             catalog_all: Vec::new(),
             home: Vec::new(),
             source_filter: None,
@@ -511,11 +627,18 @@ impl AppState {
             entry_anim: Motion::new(1.0),
             nav_pill: Motion::new(0.0),
             nav_pill_v: 0.0,
+            nav_scroll: 0.0,
+            nav_scroll_max: 0.0,
             nav_pill_vis: Motion::new(1.0),
             page_anim: Motion::new(1.0),
             last_mode: Mode::Browse,
             last_tick: Instant::now(),
             anim_running: false,
+            frame_probe: std::env::var_os("ALLSTORE_FRAME_LOG").is_some(),
+            frame_window: Instant::now(),
+            frame_count: 0,
+            frame_total: 0.0,
+            frame_max: 0.0,
             status: "正在连接应用目录…".into(),
             status_prev: String::new(),
             status_anim: Motion::new(1.0),
@@ -985,6 +1108,8 @@ impl AppState {
                 .collect(),
             None => self.catalog_all.clone(),
         };
+        // Derived labels depend only on the row, so compute them once here.
+        self.card_texts = self.apps.iter().map(CardText::new).collect();
         let max = self.max_scroll();
         let v = self.scroll.min(max).max(0);
         self.set_scroll(v);
@@ -1017,24 +1142,81 @@ impl AppState {
 
     // --- animation plumbing ------------------------------------------------
 
-    /// Start the 60 Hz clock. Idempotent, so any state change can ask for it.
+    /// Start the compositor-paced clock. Idempotent, so any state change can
+    /// ask for it.
     fn start_anim(&mut self) {
         self.last_tick = Instant::now();
         if !self.anim_running {
             self.anim_running = true;
-            unsafe {
-                SetTimer(Some(self.hwnd), TIMER_ANIM, 16, None);
-            }
+            start_pacer(self.hwnd);
         }
     }
 
     fn stop_anim(&mut self) {
         if self.anim_running {
             self.anim_running = false;
-            unsafe {
-                let _ = KillTimer(Some(self.hwnd), TIMER_ANIM);
-            }
+            PACER_ON.store(false, Ordering::SeqCst);
+            FRAME_PENDING.store(0, Ordering::SeqCst);
         }
+    }
+
+    /// Opt-in frame accounting. Logs the achieved frame rate, plus the mean
+    /// and worst per-frame cost, once a second while animation is running.
+    fn note_frame(&mut self, paint: Duration) {
+        if !self.frame_probe {
+            return;
+        }
+        let ms = paint.as_secs_f32() * 1000.0;
+        self.frame_count += 1;
+        self.frame_total += ms;
+        self.frame_max = self.frame_max.max(ms);
+        let wall = self.frame_window.elapsed().as_secs_f32();
+        if wall >= 1.0 {
+            net::log(&format!(
+                "FRAME fps={:.0} paint_avg={:.2}ms paint_max={:.2}ms",
+                self.frame_count as f32 / wall,
+                self.frame_total / self.frame_count as f32,
+                self.frame_max
+            ));
+            self.frame_window = Instant::now();
+            self.frame_count = 0;
+            self.frame_total = 0.0;
+            self.frame_max = 0.0;
+        }
+    }
+
+    /// Advance every eased value once and repaint. `dt` is real elapsed time,
+    /// so the easing takes the same wall-clock time at 60, 144 or 240 Hz — only
+    /// the number of intermediate positions changes. That is what makes the
+    /// same easing feel smooth on a 240 Hz panel instead of stepping at 60.
+    fn step_frame(&mut self) {
+        let dt = self.last_tick.elapsed().as_secs_f32().clamp(0.001, 0.05);
+        self.last_tick = Instant::now();
+        let mut live = self.hover_anim.step(dt);
+        self.nav_pill.set(self.nav_y(self.active_nav));
+        live |= self.nav_pill.step_spring(dt, &mut self.nav_pill_v);
+        self.nav_pill_vis
+            .set(if self.pill_visible() { 1.0 } else { 0.0 });
+        live |= self.nav_pill_vis.step(dt);
+        live |= self.page_anim.step(dt);
+        live |= self.entry_anim.step(dt);
+        live |= self.status_anim.step(dt);
+        // Scroll walks toward the wheel target. `scroll_frac` keeps the
+        // sub-pixel remainder so a short delta still moves a whole row instead
+        // of rounding to zero forever.
+        let d = self.scroll_target - self.scroll_frac;
+        if d.abs() > 0.1 {
+            self.scroll_frac += d * (dt * 20.0).min(1.0);
+            self.scroll = self.scroll_frac.round() as i32;
+            live = true;
+        } else if self.scroll != self.scroll_target.round() as i32 {
+            self.scroll_frac = self.scroll_target;
+            self.scroll = self.scroll_target.round() as i32;
+        }
+        if !live {
+            self.stop_anim();
+        }
+        self.invalidate();
     }
 
     /// How strongly the given control is hovered right now (0..1).
@@ -1084,15 +1266,33 @@ impl AppState {
         self.start_anim();
     }
 
+    /// Bring a sidebar row back into view when it is selected from elsewhere
+    /// (keyboard, or a category opened programmatically).
+    fn reveal_nav(&mut self, i: usize) {
+        if self.nav_scroll_max <= 0.5 {
+            return;
+        }
+        let footer_top = self.height as f32 - STATUS_H - 40.0;
+        let top = self.nav_y(i);
+        let bottom = top + NAV_ROW_H;
+        let view_top = TOP_H + 8.0;
+        if top - self.nav_scroll < view_top {
+            self.nav_scroll = (top - view_top).max(0.0);
+        } else if bottom - self.nav_scroll > footer_top {
+            self.nav_scroll = (bottom - footer_top).min(self.nav_scroll_max);
+        }
+    }
+
     fn load_nav(&mut self, classes: &[ClassGroup]) {
         let previous = self
             .nav
             .get(self.active_nav)
             .map(|n| (n.kind.clone(), n.id.clone()));
         self.nav.clear();
-        for (label, code, id, kind, group) in [
-            ("推荐", "soft", "-1", NavKind::Browse, 0u8),
-            ("我的软件", "", "", NavKind::Library, 1u8),
+        self.nav_scroll = 0.0;
+        for (label, code, id, kind, group, glyph) in [
+            ("推荐", "soft", "-1", NavKind::Browse, 0u8, NAV_GLYPH_HOME),
+            ("我的软件", "", "", NavKind::Library, 1u8, NAV_GLYPH_LIBRARY),
         ] {
             self.nav.push(NavItem {
                 label: label.into(),
@@ -1100,6 +1300,7 @@ impl AppState {
                 id: id.into(),
                 kind,
                 group,
+                glyph,
             });
         }
         for g in classes {
@@ -1116,6 +1317,7 @@ impl AppState {
                     id: c.id.clone(),
                     kind: NavKind::Browse,
                     group: 2,
+                    glyph: category_glyph(&c.name),
                 });
             }
         }
@@ -1162,6 +1364,7 @@ impl AppState {
         let item = self.nav[idx].clone();
         self.active_nav = idx;
         self.move_pill();
+        self.reveal_nav(idx);
         self.focus_search = false;
         self.mode = Mode::Browse;
         self.set_scroll(0);
@@ -1413,6 +1616,30 @@ impl AppState {
         Some((x, y, x + cw, y + CARD_H))
     }
 
+    /// Index range of rows intersecting the content viewport, inclusive on
+    /// both ends. Rendering the full catalog every frame used to run ~850
+    /// `inventory.status()` scans (each a linear walk over 160 installed apps
+    /// plus a fresh normalized String) just to paint ~20 visible cards. The
+    /// row math mirrors `card_rect`; one extra row on each side absorbs the
+    /// stagger lift and the sub-pixel scroll remainder.
+    fn visible_card_range(&self, len: usize) -> (usize, usize) {
+        if len == 0 {
+            return (0, 0);
+        }
+        let cols = self.cols().max(1);
+        let step = CARD_H + GAP;
+        let top = TOP_H + HERO_H + 28.0;
+        let scroll = self.scroll as f32;
+        let h = self.height as f32;
+        // First visible row: its bottom edge reaches the content top.
+        let first = ((scroll - CARD_H - 12.0) / step).floor();
+        // Last visible row: its top edge is above the status bar.
+        let last = ((h - STATUS_H - top + scroll) / step).ceil();
+        let lo = (first as i32 - 1).max(0) as usize * cols;
+        let hi = (last as i32 + 1).max(0) as usize * cols;
+        (lo.min(len), hi.min(len))
+    }
+
     fn install_rect(card: (f32, f32, f32, f32)) -> D2D_RECT_F {
         gfx::rect(card.2 - 100.0, card.3 - 46.0, card.2 - 14.0, card.3 - 14.0)
     }
@@ -1529,12 +1756,15 @@ impl AppState {
         (w - NAV_W - 2.0 * PAD - 10.0).max(180.0)
     }
 
+    /// Top edge of row `i` in unscrolled list space. `nav_rect` applies the
+    /// scroll offset, so the selection pill can animate in a stable coordinate
+    /// system and stays glued to its row while the list scrolls.
     fn nav_y(&self, i: usize) -> f32 {
         let mut y = TOP_H + 8.0;
         let mut prev = u8::MAX;
         for (j, n) in self.nav.iter().enumerate() {
             if n.group != prev {
-                y += 24.0;
+                y += NAV_GROUP_GAP;
                 prev = n.group;
             }
             if j == i {
@@ -1545,9 +1775,16 @@ impl AppState {
         y
     }
 
+    /// Bottom of the whole sidebar list, unscrolled. Comparing this with the
+    /// pane height tells `render_nav` how far the list may scroll.
+    fn nav_content_bottom(&self) -> f32 {
+        let groups: Vec<u8> = self.nav.iter().map(|n| n.group).collect();
+        nav_list_bottom(&groups)
+    }
+
     fn nav_rect(&self, i: usize) -> D2D_RECT_F {
-        let y = self.nav_y(i);
-        gfx::rect(12.0, y, NAV_W - 12.0, y + 34.0)
+        let y = self.nav_y(i) - self.nav_scroll;
+        gfx::rect(12.0, y, NAV_W - 12.0, y + NAV_ITEM_H)
     }
 
     fn group_title(group: u8) -> &'static str {
@@ -1950,25 +2187,32 @@ impl AppState {
         );
         self.gfx
             .fill(gfx::rect(NAV_W - 1.0, TOP_H, NAV_W, h - STATUS_H), p.border);
-        let rects: Vec<D2D_RECT_F> = (0..self.nav.len()).map(|i| self.nav_rect(i)).collect();
-        let labels: Vec<String> = self.nav.iter().map(|n| n.label.clone()).collect();
-        let groups: Vec<u8> = self.nav.iter().map(|n| n.group).collect();
-        // Utility pages are not part of the list any more, so no row may stay
-        // highlighted while one of them is open.
-        let utility = matches!(self.mode, Mode::Updates | Mode::Downloads | Mode::Settings);
         // Reserve the footer band: without this the last category row was
         // drawn straight through the version label on short windows.
         let footer_top = h - STATUS_H - 40.0;
+        // Taller rows mean the category list can outgrow the pane. It then
+        // scrolls inside the sidebar instead of silently dropping rows.
+        let content = self.nav_content_bottom();
+        self.nav_scroll_max = (content - footer_top).max(0.0);
+        self.nav_scroll = self.nav_scroll.clamp(0.0, self.nav_scroll_max);
+        self.gfx.push_clip(gfx::rect(0.0, TOP_H, NAV_W, footer_top));
+        let rects: Vec<D2D_RECT_F> = (0..self.nav.len()).map(|i| self.nav_rect(i)).collect();
+        let labels: Vec<String> = self.nav.iter().map(|n| n.label.clone()).collect();
+        let groups: Vec<u8> = self.nav.iter().map(|n| n.group).collect();
+        let glyphs: Vec<char> = self.nav.iter().map(|n| n.glyph).collect();
+        // Utility pages are not part of the list any more, so no row may stay
+        // highlighted while one of them is open.
+        let utility = matches!(self.mode, Mode::Updates | Mode::Downloads | Mode::Settings);
         // The selection pill is one object that slides between rows instead of
         // a background that teleports — the single most noticeable motion cue
         // in a sidebar, and it fades out when a utility page takes over.
         let vis = self.nav_pill_vis.value.clamp(0.0, 1.0);
         if vis > 0.01 && !utility {
-            let py = self.nav_pill.value;
-            let pill = gfx::rect(12.0, py, NAV_W - 12.0, py + 34.0);
-            self.gfx.round(pill, 9.0, p.accent_soft.with_alpha(vis));
+            let py = self.nav_pill.value - self.nav_scroll;
+            let pill = gfx::rect(12.0, py, NAV_W - 12.0, py + NAV_ITEM_H);
+            self.gfx.round(pill, 10.0, p.accent_soft.with_alpha(vis));
             self.gfx.round(
-                gfx::rect(12.0, py + 8.0, 15.0, py + 26.0),
+                gfx::rect(12.0, py + 10.0, 15.0, py + NAV_ITEM_H - 10.0),
                 1.5,
                 p.accent.with_alpha(vis),
             );
@@ -1976,31 +2220,65 @@ impl AppState {
         let mut prev_group = u8::MAX;
         for i in 0..self.nav.len() {
             let r = rects[i];
-            if r.bottom > footer_top {
+            if r.top > footer_top {
                 break;
             }
             if groups[i] != prev_group {
                 prev_group = groups[i];
                 self.gfx.text(
                     Self::group_title(groups[i]),
-                    gfx::rect(20.0, r.top - 20.0, NAV_W - 16.0, r.top - 2.0),
+                    gfx::rect(22.0, r.top - 24.0, NAV_W - 16.0, r.top - 6.0),
                     10,
                     true,
                     p.sub,
                 );
             }
+            if r.bottom < TOP_H {
+                continue;
+            }
             let active = i == self.active_nav && !utility;
             let amt = self.hover_amt(HIT_NAV, i);
             if !active && amt > 0.01 {
-                self.gfx.round(r, 9.0, p.hover.with_alpha(amt));
+                self.gfx.round(r, 10.0, p.hover.with_alpha(amt));
             }
             let hot = active && vis > 0.5;
+            // 16 px glyph box, optically centred against the label baseline.
+            let icon_box = gfx::rect(
+                22.0,
+                r.top + (NAV_ITEM_H - 18.0) * 0.5,
+                38.0,
+                r.top + (NAV_ITEM_H + 18.0) * 0.5,
+            );
+            self.gfx.icon(
+                glyphs[i],
+                icon_box,
+                15,
+                if hot {
+                    p.accent
+                } else {
+                    p.sub.mix(p.text, amt)
+                },
+            );
             self.gfx.text(
                 &labels[i],
-                gfx::rect(26.0, r.top, r.right - 12.0, r.bottom),
+                gfx::rect(48.0, r.top, r.right - 10.0, r.bottom),
                 13,
-                hot,
+                true,
                 if hot { p.accent } else { p.text },
+            );
+        }
+        self.gfx.pop_clip();
+        // Thin thumb so a scrolled list is obvious without a full scrollbar.
+        if self.nav_scroll_max > 0.5 {
+            let track_top = TOP_H + 8.0;
+            let track_h = (footer_top - 8.0 - track_top).max(1.0);
+            let total = (content - TOP_H).max(1.0);
+            let thumb_h = (track_h * track_h / total).clamp(24.0, track_h);
+            let ty = track_top + (track_h - thumb_h) * (self.nav_scroll / self.nav_scroll_max);
+            self.gfx.round(
+                gfx::rect(NAV_W - 5.0, ty, NAV_W - 2.0, ty + thumb_h),
+                1.5,
+                p.sub.with_alpha(0.45),
             );
         }
         self.gfx.fill(
@@ -2165,22 +2443,22 @@ impl AppState {
         }
 
         // Resolve task states up front: rendering needs &mut gfx while the
-        // task list is borrowed immutably.
-        let states: Vec<Option<(DlState, f32, String)>> = self
-            .apps
-            .iter()
-            .map(|a| {
-                self.task_for(&a.name)
-                    .map(|t| (t.state, t.frac(), t.percent()))
-            })
-            .collect();
-        let local_states: Vec<Option<InstalledApp>> = self
-            .apps
-            .iter()
-            .map(|a| self.inventory.status(&a.name, a.version.as_deref()))
-            .collect();
+        // task list is borrowed immutably. Only the visible rows are queried —
+        // `inventory.status` normalizes the store name and linearly walks the
+        // installed snapshot, so doing it for all ~850 rows every frame burned
+        // millions of string comparisons per second for ~20 on-screen cards.
+        // The vectors stay catalog-length so callers keep indexing by `i`.
+        let (lo, hi) = self.visible_card_range(self.apps.len());
+        let mut states: Vec<Option<(DlState, f32, String)>> = vec![None; self.apps.len()];
+        let mut local_states: Vec<Option<InstalledApp>> = vec![None; self.apps.len()];
+        for (i, a) in self.apps.iter().enumerate().take(hi).skip(lo) {
+            states[i] = self
+                .task_for(&a.name)
+                .map(|t| (t.state, t.frac(), t.percent()));
+            local_states[i] = self.inventory.status(&a.name, a.version.as_deref());
+        }
 
-        for (i, a) in self.apps.iter().enumerate() {
+        for (i, a) in self.apps.iter().enumerate().take(hi).skip(lo) {
             let Some(card) = self.card_rect(i) else {
                 continue;
             };
@@ -2228,8 +2506,8 @@ impl AppState {
             let name_r = Self::card_name_rect(card);
             self.gfx.text(&a.name, name_r, 15, true, p.text);
             let desc_r = Self::card_desc_rect(card);
-            let desc = a.subtitle();
-            self.gfx.paragraph(&desc, desc_r, 12, false, p.sub, 2);
+            let desc = &self.card_texts[i].subtitle;
+            self.gfx.paragraph(desc, desc_r, 12, false, p.sub, 2);
             self.gfx.fill(
                 gfx::rect(x0 + 16.0, y0 + 88.0, x1 - 16.0, y0 + 89.0),
                 p.border,
@@ -2238,7 +2516,7 @@ impl AppState {
             // Rating chip + price / size / install count, sized with real
             // DirectWrite metrics rather than per-character guesses.
             let meta_r = Self::card_meta_rect(card);
-            let score = a.score_text();
+            let score = &self.card_texts[i].score;
             let mut cx = meta_r.left;
             if !score.is_empty() {
                 let label = format!("★ {}", score);
@@ -2258,14 +2536,8 @@ impl AppState {
                 );
                 cx += cw + 8.0;
             }
-            let meta = a.meta();
-            let price_line = if meta.is_empty() {
-                "免费".to_string()
-            } else {
-                format!("免费  ·  {}", meta)
-            };
             self.gfx.text(
-                &price_line,
+                &self.card_texts[i].price_line,
                 gfx::rect(cx, meta_r.top, meta_r.right, meta_r.bottom),
                 11,
                 false,
@@ -2683,9 +2955,15 @@ impl AppState {
             if in_rect(x, y, Self::gear_rect(h)) {
                 return Some((HIT_SET_GEAR, 0));
             }
-            for i in 0..self.nav.len() {
-                if in_rect(x, y, self.nav_rect(i)) {
-                    return Some((HIT_NAV, i));
+            // Only rows actually inside the scroll viewport can be clicked;
+            // a row scrolled out of view must not steal a click that belongs
+            // to the footer band.
+            let footer_top = h - STATUS_H - 40.0;
+            if y >= TOP_H && y <= footer_top {
+                for i in 0..self.nav.len() {
+                    if in_rect(x, y, self.nav_rect(i)) {
+                        return Some((HIT_NAV, i));
+                    }
                 }
             }
             return None;
@@ -2880,36 +3158,6 @@ impl AppState {
                 }
             }
             WM_TIMER => {
-                if wparam.0 == TIMER_ANIM {
-                    let dt = self.last_tick.elapsed().as_secs_f32().clamp(0.001, 0.05);
-                    self.last_tick = Instant::now();
-                    let mut live = self.hover_anim.step(dt);
-                    self.nav_pill.set(self.nav_y(self.active_nav));
-                    live |= self.nav_pill.step_spring(dt, &mut self.nav_pill_v);
-                    self.nav_pill_vis
-                        .set(if self.pill_visible() { 1.0 } else { 0.0 });
-                    live |= self.nav_pill_vis.step(dt);
-                    live |= self.page_anim.step(dt);
-                    live |= self.entry_anim.step(dt);
-                    live |= self.status_anim.step(dt);
-                    // Scroll walks toward the wheel target. `scroll_frac`
-                    // keeps the sub-pixel remainder so a short delta still
-                    // moves a whole row instead of rounding to zero forever.
-                    let d = self.scroll_target - self.scroll_frac;
-                    if d.abs() > 0.1 {
-                        self.scroll_frac += d * (dt * 20.0).min(1.0);
-                        self.scroll = self.scroll_frac.round() as i32;
-                        live = true;
-                    } else if self.scroll != self.scroll_target.round() as i32 {
-                        self.scroll_frac = self.scroll_target;
-                        self.scroll = self.scroll_target.round() as i32;
-                    }
-                    if !live {
-                        self.stop_anim();
-                    }
-                    self.invalidate();
-                    return Some(LRESULT(0));
-                }
                 if wparam.0 != TIMER_ID {
                     return None;
                 }
@@ -3025,6 +3273,24 @@ impl AppState {
             }
             WM_MOUSEWHEEL => {
                 let delta = ((wparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                // Over the sidebar the wheel scrolls the category list, not the
+                // page behind it. The lparam of a wheel message is in screen
+                // coordinates, hence the conversion.
+                let mut pt = POINT::default();
+                unsafe {
+                    let _ = GetCursorPos(&mut pt);
+                    let _ = ScreenToClient(self.hwnd, &mut pt);
+                }
+                let s = self.gfx.scale.max(0.5);
+                let over_nav = pt.x as f32 / s < NAV_W
+                    && pt.y as f32 / s >= TOP_H
+                    && pt.y as f32 / s <= self.height as f32 - STATUS_H - 40.0;
+                if over_nav && self.nav_scroll_max > 0.0 {
+                    let step = (delta as f32 / 120.0) * NAV_WHEEL_STEP;
+                    self.nav_scroll = (self.nav_scroll - step).clamp(0.0, self.nav_scroll_max);
+                    self.invalidate();
+                    return Some(LRESULT(0));
+                }
                 // Rapid notches accumulate on the target instead of fighting
                 // an eased position that has not caught up yet.
                 let target = self.scroll_target - (delta / 3) as f32;
@@ -3126,6 +3392,23 @@ impl AppState {
                     return Some(LRESULT(0));
                 }
                 None
+            }
+            WM_APP_FRAME => {
+                let started = Instant::now();
+                self.step_frame();
+                // Paint inside the frame instead of letting WM_PAINT queue up
+                // behind other input: at 240 Hz a deferred paint lands a whole
+                // vblank late and turns smooth motion into judder. Only after
+                // the paint is done does the slot free up for the next frame,
+                // which is what keeps the pacer honest on a slow GPU.
+                unsafe {
+                    let _ = UpdateWindow(self.hwnd);
+                }
+                self.note_frame(started.elapsed());
+                let _ = FRAME_PENDING.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    Some(v.saturating_sub(1))
+                });
+                Some(LRESULT(0))
             }
             WM_APP_DATA
             | WM_APP_LIST
@@ -3284,6 +3567,56 @@ impl AppState {
 
 pub(crate) fn in_rect(x: f32, y: f32, r: D2D_RECT_F) -> bool {
     x >= r.left && x <= r.right && y >= r.top && y <= r.bottom
+}
+
+/// Total height of the sidebar list for a given group sequence, including the
+/// trailing padding. Pure so the scrolling geometry stays unit-testable.
+pub(crate) fn nav_list_bottom(groups: &[u8]) -> f32 {
+    let mut y = TOP_H + 8.0;
+    let mut prev = u8::MAX;
+    for g in groups {
+        if *g != prev {
+            y += NAV_GROUP_GAP;
+            prev = *g;
+        }
+        y += NAV_ROW_H;
+    }
+    y + 6.0
+}
+
+/// Icon for a category row. The catalog hands us free-text names ("聊天社交",
+/// "下载工具", …) that change between sources, so this matches on keywords
+/// instead of exact labels and falls back to a neutral list glyph. Every glyph
+/// below was checked against Segoe MDL2 Assets on Windows 10/11.
+pub(crate) fn category_glyph(name: &str) -> char {
+    const RULES: &[(&[&str], char)] = &[
+        (&["聊天", "社交", "通讯", "即时"], '\u{E8BD}'),
+        (&["输入法", "字体", "打字"], '\u{E765}'),
+        (&["浏览", "网页", "上网", "网络"], '\u{E774}'),
+        (&["下载", "传输", "离线"], '\u{E896}'),
+        (&["视频", "影视", "播放", "直播"], '\u{E714}'),
+        (&["音乐", "音频", "电台", "听书"], '\u{E8D6}'),
+        (
+            &["图像", "图片", "图形", "设计", "摄影", "壁纸"],
+            '\u{E9D2}',
+        ),
+        (&["办公", "文档", "笔记", "阅读", "电子书"], '\u{E8A5}'),
+        (&["游戏", "娱乐"], '\u{E7FC}'),
+        (&["开发", "编程", "代码", "运维"], '\u{E943}'),
+        (&["教育", "学习", "考试", "词典"], '\u{E7BE}'),
+        (&["安全", "杀毒", "防护", "管家", "密码"], '\u{EA18}'),
+        (&["系统", "优化", "清理", "驱动", "硬件"], '\u{E713}'),
+        (&["压缩", "解压", "文件", "资源管理"], '\u{E8B7}'),
+        (&["购物", "电商", "生活"], '\u{E719}'),
+        (&["财经", "股票", "金融", "理财"], '\u{E9D9}'),
+        (&["工具", "实用", "效率"], '\u{E8EC}'),
+    ];
+    for (keys, glyph) in RULES {
+        if keys.iter().any(|k| name.contains(k)) {
+            return *glyph;
+        }
+    }
+    NAV_GLYPH_CATEGORY
 }
 
 /// Source filter chips ("全部源 / 联想 / 腾讯 / …") laid out inside the hero
@@ -3514,6 +3847,44 @@ mod tests {
                 "h={h}: gear reaches the status bar"
             );
         }
+    }
+
+    /// Sidebar rows got taller in 0.14.4. A category list that no longer fits
+    /// must scroll inside the pane instead of silently dropping rows.
+    #[test]
+    fn tall_sidebar_scrolls_instead_of_dropping_rows() {
+        let mut groups = vec![0u8, 1u8];
+        groups.extend(std::iter::repeat_n(2u8, 12));
+        let content = nav_list_bottom(&groups);
+        let h = 620.0f32;
+        let footer_top = h - STATUS_H - 40.0;
+        let max = (content - footer_top).max(0.0);
+        assert!(max > 0.0, "14 rows must overflow a 620 DIP window");
+        // First row is fully visible at offset 0 …
+        let first_bottom = TOP_H + 8.0 + NAV_GROUP_GAP + NAV_ITEM_H;
+        assert!(first_bottom <= footer_top);
+        // … and the last row is fully visible once scrolled to the end.
+        let last_bottom = content - 6.0 - max;
+        assert!(last_bottom <= footer_top + 0.01, "{last_bottom}");
+        assert!(last_bottom > TOP_H);
+    }
+
+    /// Every category gets an icon, and unknown names fall back rather than
+    /// leaving a hole in front of the label.
+    #[test]
+    fn categories_map_onto_icons() {
+        for (name, glyph) in [
+            ("聊天社交", '\u{E8BD}'),
+            ("输入法", '\u{E765}'),
+            ("浏览器", '\u{E774}'),
+            ("下载工具", '\u{E896}'),
+            ("视频软件", '\u{E714}'),
+            ("办公软件", '\u{E8A5}'),
+            ("游戏", '\u{E7FC}'),
+        ] {
+            assert_eq!(category_glyph(name), glyph, "{name}");
+        }
+        assert_eq!(category_glyph("某个没见过的分类"), NAV_GLYPH_CATEGORY);
     }
 
     #[test]
@@ -3776,13 +4147,94 @@ mod tests {
             m.set(target);
             let mut v = 0.0;
             let mut frames = 0;
-            // 16 ms clock, same bound as the real WM_TIMER handler.
+            // 16 ms frame, the slowest clock any monitor will ask for.
             while m.step_spring(0.016, &mut v) && frames < 300 {
                 frames += 1;
             }
             assert!(frames < 300, "spring diverged toward {target}");
             assert!((m.value - target).abs() < 0.01, "settled at {}", m.value);
         }
+    }
+
+    #[test]
+    fn nav_spring_stays_stable_at_high_refresh_rates() {
+        // The pill spring is integrated with explicit Euler steps, so the step
+        // size matters: a 240 Hz panel halves the dt of the 60 Hz tests above.
+        for hz in [60.0f32, 144.0, 240.0] {
+            let dt = 1.0 / hz;
+            let mut m = Motion::new(0.0);
+            m.set(42.0);
+            let mut v = 0.0;
+            let mut frames = 0;
+            while m.step_spring(dt, &mut v) && frames < 3000 {
+                frames += 1;
+            }
+            assert!(frames < 3000, "spring never settled at {hz} Hz");
+            assert!(
+                (m.value - 42.0).abs() < 0.01,
+                "settled at {} at {hz} Hz",
+                m.value
+            );
+            // Same damping ratio at every step size: a small, deliberate
+            // overshoot that never becomes a visible bounce.
+            assert!(m.value <= 42.8, "overshoot {} at {hz} Hz", m.value - 42.0);
+        }
+    }
+
+    #[test]
+    fn easing_covers_the_same_distance_in_the_same_time_at_any_refresh_rate() {
+        // Motion advances by wall-clock dt, so 60, 144 and 240 Hz must be at
+        // the same place after the same 200 ms — only the number of drawn
+        // intermediate positions differs, which is exactly what makes the
+        // animation look smooth on a high-refresh panel.
+        let mut reached = Vec::new();
+        for hz in [60.0f32, 144.0, 240.0] {
+            let dt = 1.0 / hz;
+            let mut m = Motion::new(0.0);
+            m.set(100.0);
+            let mut t = 0.0;
+            while t < 0.2 {
+                m.step(dt);
+                t += dt;
+            }
+            reached.push(m.value);
+        }
+        let lo = reached.iter().copied().fold(f32::INFINITY, f32::min);
+        let hi = reached.iter().copied().fold(0.0f32, f32::max);
+        assert!(
+            hi - lo < 2.5,
+            "refresh rate changed the easing curve: {reached:?}"
+        );
+    }
+
+    #[test]
+    fn visible_card_range_covers_the_viewport_without_the_whole_catalog() {
+        // Mirrors the row math in `visible_card_range`. At the top of a tall
+        // catalog only a few rows intersect the viewport, not all ~850.
+        let step = CARD_H + GAP;
+        let top = TOP_H + HERO_H + 28.0;
+        let h = 900.0f32;
+        let cols = 4usize;
+        let len = 851usize;
+
+        let first = |scroll: f32| ((scroll - CARD_H - 12.0) / step).floor() as i32 - 1;
+        let last = |scroll: f32| ((h - STATUS_H - top + scroll) / step).ceil() as i32 + 1;
+        let lo = |scroll: f32| (first(scroll).max(0) as usize) * cols;
+        let hi = |scroll: f32| (last(scroll).max(0) as usize) * cols;
+
+        // At scroll 0: first clamp to 0, last row ≈ (900-40-188)/190 ≈ 4.
+        assert_eq!(lo(0.0), 0);
+        let hi0 = hi(0.0).min(len);
+        assert!(hi0 > 0 && hi0 < len / 2, "top viewport queried {hi0} rows");
+
+        // Mid-scroll: window slides but stays narrow relative to catalog.
+        let lo_mid = lo(4000.0);
+        let hi_mid = hi(4000.0).min(len);
+        assert!(lo_mid > 0, "mid scroll should skip leading rows");
+        assert!(hi_mid - lo_mid < len / 2);
+
+        // Deeper than the end: range is clamped to the catalog length.
+        assert_eq!(hi(100_000.0).min(len), len);
     }
 
     #[test]

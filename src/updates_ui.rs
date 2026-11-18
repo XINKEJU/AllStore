@@ -728,7 +728,7 @@ impl AppState {
         if x1 <= x0 {
             return None;
         }
-        let top = TOP_H + 84.0 + i as f32 * (ROW_H + GAP) - self.scroll as f32;
+        let top = TOP_H + 84.0 + i as f32 * (ROW_H + GAP) - self.scroll_px();
         if top + ROW_H < TOP_H + 70.0 || top > h - STATUS_H {
             return None;
         }

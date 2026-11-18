@@ -1061,7 +1061,7 @@ impl AppState {
         if x1 <= x0 + 460.0 {
             return None;
         }
-        let top = DL_ROWS_TOP + i as f32 * (DL_ROW_H + GAP) - self.scroll as f32;
+        let top = DL_ROWS_TOP + i as f32 * (DL_ROW_H + GAP) - self.scroll_px();
         if top + DL_ROW_H < DL_ROWS_TOP || top > h - STATUS_H {
             return None;
         }

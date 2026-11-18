@@ -200,6 +200,13 @@ pub(crate) const NAV_GLYPH_LIBRARY: char = '\u{E82D}';
 pub(crate) const NAV_GLYPH_CATEGORY: char = '\u{E71D}';
 /// Sidebar scroll step per wheel notch, in DIPs.
 const NAV_WHEEL_STEP: f32 = 54.0;
+
+/// The header logo is the real app icon, compiled into the binary (16 KB) so
+/// the window never depends on a file next to the exe.
+const BRAND_ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
+/// Cache key for that bitmap; kept out of the store-icon LRU by re-inserting
+/// on demand after a device reset.
+const BRAND_LOGO: &str = "brand:logo";
 pub(crate) const ROW_H: f32 = 84.0;
 pub(crate) const HERO_H: f32 = 88.0;
 pub(crate) const MIN_W: i32 = 1000;
@@ -439,8 +446,13 @@ pub struct AppState {
     /// Sidebar list scroll offset. The category list is taller than the pane on
     /// short windows, so it scrolls on its own instead of dropping rows.
     nav_scroll: f32,
+    /// Where that scroll is heading; the clock eases the two apart.
+    nav_scroll_target: f32,
     /// Clamp for `nav_scroll`, recomputed every frame from the real pane height.
     nav_scroll_max: f32,
+    /// Set when the PNG decoder rejects the embedded icon, so the header stops
+    /// retrying it every frame.
+    brand_icon_failed: bool,
     /// 1 = a nav row is selected, 0 = a utility page owns the content pane.
     pub nav_pill_vis: Motion,
     /// Page transition progress (0 = entering, 1 = settled).
@@ -628,7 +640,9 @@ impl AppState {
             nav_pill: Motion::new(0.0),
             nav_pill_v: 0.0,
             nav_scroll: 0.0,
+            nav_scroll_target: 0.0,
             nav_scroll_max: 0.0,
+            brand_icon_failed: false,
             nav_pill_vis: Motion::new(1.0),
             page_anim: Motion::new(1.0),
             last_mode: Mode::Browse,
@@ -1201,17 +1215,26 @@ impl AppState {
         live |= self.page_anim.step(dt);
         live |= self.entry_anim.step(dt);
         live |= self.status_anim.step(dt);
-        // Scroll walks toward the wheel target. `scroll_frac` keeps the
-        // sub-pixel remainder so a short delta still moves a whole row instead
-        // of rounding to zero forever.
+        // Scroll walks toward the wheel target. The paint uses `scroll_frac`
+        // directly, so motion is sub-pixel: rounding to whole DIPs made every
+        // frame jump 2 device pixels at 200 % scaling and read as stutter.
         let d = self.scroll_target - self.scroll_frac;
-        if d.abs() > 0.1 {
-            self.scroll_frac += d * (dt * 20.0).min(1.0);
+        if d.abs() > 0.05 {
+            self.scroll_frac += d * (1.0 - (-dt * 18.0).exp());
             self.scroll = self.scroll_frac.round() as i32;
             live = true;
-        } else if self.scroll != self.scroll_target.round() as i32 {
+        } else if self.scroll_frac != self.scroll_target {
             self.scroll_frac = self.scroll_target;
             self.scroll = self.scroll_target.round() as i32;
+        }
+        // The sidebar glides on the same curve instead of teleporting by a
+        // whole row per wheel notch.
+        let nd = self.nav_scroll_target - self.nav_scroll;
+        if nd.abs() > 0.05 {
+            self.nav_scroll += nd * (1.0 - (-dt * 18.0).exp());
+            live = true;
+        } else if self.nav_scroll != self.nav_scroll_target {
+            self.nav_scroll = self.nav_scroll_target;
         }
         if !live {
             self.stop_anim();
@@ -1252,6 +1275,13 @@ impl AppState {
         self.scroll_target = v as f32;
     }
 
+    /// Painting offset in DIPs. This is the eased, sub-pixel value, and hit
+    /// testing reads the same number, so a click always lands on the card
+    /// that is actually under the pointer.
+    pub(crate) fn scroll_px(&self) -> f32 {
+        self.scroll_frac
+    }
+
     /// Queue a wheel/keyboard scroll. The actual position is advanced by the
     /// animation clock, keeping hit testing and painting on one value.
     fn scroll_to(&mut self, target: i32) {
@@ -1276,11 +1306,12 @@ impl AppState {
         let top = self.nav_y(i);
         let bottom = top + NAV_ROW_H;
         let view_top = TOP_H + 8.0;
-        if top - self.nav_scroll < view_top {
-            self.nav_scroll = (top - view_top).max(0.0);
-        } else if bottom - self.nav_scroll > footer_top {
-            self.nav_scroll = (bottom - footer_top).min(self.nav_scroll_max);
+        if top - self.nav_scroll_target < view_top {
+            self.nav_scroll_target = (top - view_top).max(0.0);
+        } else if bottom - self.nav_scroll_target > footer_top {
+            self.nav_scroll_target = (bottom - footer_top).min(self.nav_scroll_max);
         }
+        self.start_anim();
     }
 
     fn load_nav(&mut self, classes: &[ClassGroup]) {
@@ -1290,6 +1321,7 @@ impl AppState {
             .map(|n| (n.kind.clone(), n.id.clone()));
         self.nav.clear();
         self.nav_scroll = 0.0;
+        self.nav_scroll_target = 0.0;
         for (label, code, id, kind, group, glyph) in [
             ("推荐", "soft", "-1", NavKind::Browse, 0u8, NAV_GLYPH_HOME),
             ("我的软件", "", "", NavKind::Library, 1u8, NAV_GLYPH_LIBRARY),
@@ -1608,7 +1640,7 @@ impl AppState {
         let row = i / cols;
         let col = i % cols;
         let x = NAV_W + PAD + col as f32 * (cw + GAP);
-        let y = TOP_H + HERO_H + 28.0 + row as f32 * (CARD_H + GAP) - self.scroll as f32;
+        let y = TOP_H + HERO_H + 28.0 + row as f32 * (CARD_H + GAP) - self.scroll_px();
         let h = self.height as f32;
         if y + CARD_H < TOP_H + HERO_H + 16.0 || y > h - STATUS_H {
             return None;
@@ -1629,7 +1661,7 @@ impl AppState {
         let cols = self.cols().max(1);
         let step = CARD_H + GAP;
         let top = TOP_H + HERO_H + 28.0;
-        let scroll = self.scroll as f32;
+        let scroll = self.scroll_px();
         let h = self.height as f32;
         // First visible row: its bottom edge reaches the content top.
         let first = ((scroll - CARD_H - 12.0) / step).floor();
@@ -1920,7 +1952,7 @@ impl AppState {
         let top = TOP_H + 14.0;
         let track_h = (h - STATUS_H - 16.0 - top).max(20.0);
         let thumb_h = (track_h * track_h / (track_h + max)).max(32.0);
-        let t = (self.scroll as f32 / max).clamp(0.0, 1.0);
+        let t = (self.scroll_px() / max).clamp(0.0, 1.0);
         let ty = top + (track_h - thumb_h) * t;
         self.gfx.round(
             gfx::rect(w - 10.0, ty, w - 6.0, ty + thumb_h),
@@ -2058,26 +2090,31 @@ impl AppState {
         self.gfx
             .fill(gfx::rect(0.0, TOP_H - 1.0, w, TOP_H), p.border);
 
-        let logo = gfx::rect(20.0, 18.0, 56.0, 54.0);
-        self.gfx
-            .shadow(logo, 12.0, if self.gfx.is_dark() { 0.35 } else { 0.14 });
-        self.gfx.vgradient(
-            logo,
-            12.0,
-            p.accent.mix(Color(1.0, 1.0, 1.0, 1.0), 0.18),
-            p.accent.mix(Color(0.0, 0.0, 0.0, 1.0), 0.14),
-        );
-        self.gfx.center_text("A", logo, 18, true, p.on_accent);
+        // The real application icon, decoded once from the same PNG the
+        // installer uses. It already carries its own rounded corners and a
+        // transparent margin, so no synthetic rounded rect and — crucially —
+        // no drop shadow: three stacked translucent bands read as a grey
+        // square frame around the logo rather than as depth.
+        let logo = gfx::rect(18.0, 16.0, 58.0, 56.0);
+        if !self.gfx.bitmap(BRAND_LOGO, logo) && !self.brand_icon_failed {
+            match self.gfx.decode_icon(BRAND_ICON_PNG) {
+                Some(bmp) => {
+                    self.gfx.put_icon(BRAND_LOGO.into(), bmp);
+                    self.gfx.bitmap(BRAND_LOGO, logo);
+                }
+                None => self.brand_icon_failed = true,
+            }
+        }
         self.gfx.text(
             "AllStore",
-            gfx::rect(66.0, 12.0, 240.0, 38.0),
+            gfx::rect(68.0, 12.0, 240.0, 38.0),
             17,
             true,
             p.text,
         );
         self.gfx.text(
             "发现 · 获取 · 更新",
-            gfx::rect(66.0, 36.0, 240.0, 58.0),
+            gfx::rect(68.0, 36.0, 240.0, 58.0),
             10,
             false,
             p.sub,
@@ -2195,6 +2232,7 @@ impl AppState {
         let content = self.nav_content_bottom();
         self.nav_scroll_max = (content - footer_top).max(0.0);
         self.nav_scroll = self.nav_scroll.clamp(0.0, self.nav_scroll_max);
+        self.nav_scroll_target = self.nav_scroll_target.clamp(0.0, self.nav_scroll_max);
         self.gfx.push_clip(gfx::rect(0.0, TOP_H, NAV_W, footer_top));
         let rects: Vec<D2D_RECT_F> = (0..self.nav.len()).map(|i| self.nav_rect(i)).collect();
         let labels: Vec<String> = self.nav.iter().map(|n| n.label.clone()).collect();
@@ -2877,7 +2915,7 @@ impl AppState {
         let x0 = NAV_W + PAD;
         let cw = Self::detail_text_width(w);
         let x1 = x0 + cw;
-        let mut y = DETAIL_BODY_TOP - self.scroll as f32;
+        let mut y = DETAIL_BODY_TOP - self.scroll_px();
 
         self.section_title("应用简介", x0, y, x1);
         y += 34.0;
@@ -3287,7 +3325,9 @@ impl AppState {
                     && pt.y as f32 / s <= self.height as f32 - STATUS_H - 40.0;
                 if over_nav && self.nav_scroll_max > 0.0 {
                     let step = (delta as f32 / 120.0) * NAV_WHEEL_STEP;
-                    self.nav_scroll = (self.nav_scroll - step).clamp(0.0, self.nav_scroll_max);
+                    self.nav_scroll_target =
+                        (self.nav_scroll_target - step).clamp(0.0, self.nav_scroll_max);
+                    self.start_anim();
                     self.invalidate();
                     return Some(LRESULT(0));
                 }

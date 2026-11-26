@@ -359,11 +359,30 @@ impl Gfx {
     /// different scale factor (per-monitor DPI v2).
     pub fn set_dpi(&mut self, dpi_x: f32, dpi_y: f32) {
         if dpi_x > 1.0 && dpi_y > 1.0 {
+            let before = self.icon_cap_px();
             unsafe { self.rt.SetDpi(dpi_x, dpi_y) };
             self.dpi = dpi_x;
             self.scale = dpi_x / 96.0;
             self.layouts.clear();
+            // Every cached bitmap was decoded for the old pixel cap. Drop them
+            // so the next `queue_icons` re-decodes from the disk cache at the
+            // new size: sharp when moving up to a denser monitor, and several
+            // MB lighter when moving down. No network traffic involved.
+            if self.icon_cap_px() != before {
+                self.icons.clear();
+                self.icon_order.clear();
+            }
         }
+    }
+
+    /// Largest square a logo is ever drawn at, in physical pixels.
+    ///
+    /// The detail hero shows a 96 DIP icon and cards use 64 DIP, so a fixed
+    /// 128 px decode was ~2.7x the pixels needed on a 100% display (29 KB of
+    /// BGRA per bitmap, ~400 cached → ~11 MB held for nothing). Scaling the cap
+    /// with the window DPI keeps the same sharpness and drops the waste.
+    pub fn icon_cap_px(&self) -> u32 {
+        icon_cap_for(self.scale)
     }
 
     pub fn is_dark(&self) -> bool {
@@ -913,11 +932,12 @@ impl Gfx {
             if raw_w == 0 || raw_h == 0 || raw_w > 4096 || raw_h > 4096 {
                 return None;
             }
-            // Icons are displayed at 48-96 DIPs. Downscale before uploading to
-            // the GPU so a 2048x2048 GIF cannot eat 16 MB of VRAM.
-            const MAX: u32 = 128;
-            let (tw, th) = if raw_w.max(raw_h) > MAX {
-                let s = MAX as f32 / raw_w.max(raw_h) as f32;
+            // Downscale before uploading to the GPU so a 2048x2048 GIF cannot
+            // eat 16 MB of VRAM, and so the cache holds only what the current
+            // display actually draws (see `icon_cap_px`).
+            let max = self.icon_cap_px();
+            let (tw, th) = if raw_w.max(raw_h) > max {
+                let s = max as f32 / raw_w.max(raw_h) as f32;
                 (
                     (raw_w as f32 * s).ceil() as u32,
                     (raw_h as f32 * s).ceil() as u32,
@@ -979,6 +999,16 @@ impl Gfx {
     }
 }
 
+/// Pixel cap for a decoded logo at a given DPI scale.
+///
+/// 96 DIP is the largest a logo is ever drawn at (the detail hero; cards are
+/// 64), so that is the ceiling in DIPs. Rounded up because D2D maps DIPs to
+/// physical pixels by multiplying, and clamped so a bogus scale can neither
+/// shrink the cap below a usable icon nor let a 2048 px source through.
+fn icon_cap_for(scale: f32) -> u32 {
+    ((96.0 * scale).ceil() as u32).clamp(48, 256)
+}
+
 /// Read the Windows light/dark preference.
 pub fn system_dark() -> bool {
     use windows::Win32::System::Registry::*;
@@ -1009,6 +1039,23 @@ pub fn system_dark() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The logo cap must track the display: exact at 100/125/150/200 %, never
+    /// so small that the 96 DIP hero gets upscaled, never so large that a
+    /// huge source lands on the GPU unshrunk.
+    #[test]
+    fn icon_cap_follows_the_dpi_scale() {
+        assert_eq!(icon_cap_for(1.0), 96);
+        assert_eq!(icon_cap_for(1.25), 120);
+        assert_eq!(icon_cap_for(1.5), 144);
+        assert_eq!(icon_cap_for(2.0), 192);
+        // A 96 DIP hero drawn at this scale must never need more pixels.
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            assert!(icon_cap_for(scale) as f32 >= 96.0 * scale);
+        }
+        assert_eq!(icon_cap_for(0.5), 48);
+        assert_eq!(icon_cap_for(9.0), 256);
+    }
 
     fn luminance(c: Color) -> f32 {
         let ch = |v: f32| {

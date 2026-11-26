@@ -3394,6 +3394,9 @@ impl AppState {
             WM_DPICHANGED => {
                 let dpi = (wparam.0 & 0xFFFF) as f32;
                 self.gfx.set_dpi(dpi.max(96.0), dpi.max(96.0));
+                // `set_dpi` may have dropped the logo cache (its pixel cap
+                // follows the DPI); reload the visible ones from disk.
+                self.queue_icons();
                 if lparam.0 != 0 {
                     let r = lparam.0 as *const RECT;
                     unsafe {

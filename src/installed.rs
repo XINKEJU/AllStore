@@ -181,23 +181,22 @@ pub fn scan() -> Vec<Installed> {
         scan_root(HKEY_LOCAL_MACHINE, p, &mut raw);
     }
     scan_root(HKEY_CURRENT_USER, HKCU_PATH, &mut raw);
+    dedupe(raw)
+}
 
+/// Collapse the keys that describe the same product. HKLM, WOW6432Node and
+/// HKCU often all carry one, and an in-place upgrade can leave the old key
+/// behind; the live install is the one with the **newest** version. Picking
+/// whichever key the enumeration reached first is how an app that was just
+/// updated went on being offered an update.
+fn dedupe(raw: Vec<Installed>) -> Vec<Installed> {
     let mut map: HashMap<String, Installed> = HashMap::new();
-    // HKLM, WOW6432Node and HKCU may all describe the same product. Keep the
-    // richest entry: a real version string plus a usable launch path wins.
-    let score = |x: &Installed| {
-        (
-            segments(&x.version).len(),
-            u8::from(x.icon.is_some()),
-            u8::from(x.location.is_some()),
-        )
-    };
     for i in raw {
         let k = normalize(&i.name);
         if k.is_empty() {
             continue;
         }
-        if map.get(&k).is_some_and(|prev| score(prev) >= score(&i)) {
+        if map.get(&k).is_some_and(|prev| !preferred(&i, prev)) {
             continue;
         }
         map.insert(k, i);
@@ -205,6 +204,28 @@ pub fn scan() -> Vec<Installed> {
     let mut out: Vec<Installed> = map.into_values().collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// Is `candidate` a better description of the same product than `current`?
+/// Version first (a real number beats a missing one, a newer number beats an
+/// older one), then the entry that can actually be launched.
+fn preferred(candidate: &Installed, current: &Installed) -> bool {
+    let (cv, kv) = (candidate.version.trim(), current.version.trim());
+    match (cv.is_empty(), kv.is_empty()) {
+        (true, false) => return false,
+        (false, true) => return true,
+        (true, true) => {}
+        (false, false) => {
+            if is_newer(cv, kv) {
+                return true;
+            }
+            if is_newer(kv, cv) {
+                return false;
+            }
+        }
+    }
+    let rank = |x: &Installed| (u8::from(x.icon.is_some()), u8::from(x.location.is_some()));
+    rank(candidate) > rank(current)
 }
 
 /// Lowercase alphanumerics with single spaces kept as word boundaries, plus
@@ -352,6 +373,7 @@ fn segments_with_suffix(v: &str) -> (Vec<u64>, bool) {
     (out, suffix)
 }
 
+#[cfg(test)]
 pub fn segments(v: &str) -> Vec<u64> {
     segments_with_suffix(v).0
 }
@@ -576,6 +598,38 @@ mod tests {
         assert!(name_matches("QQ音乐", "QQ音乐 官方版"));
         assert!(!name_matches("微信", "支付宝"));
         assert!(!name_matches("A", "A B C D"));
+    }
+
+    #[test]
+    fn duplicate_keys_resolve_to_the_newest_install() {
+        let key = |name: &str, version: &str, icon: Option<&str>| Installed {
+            name: name.into(),
+            version: version.into(),
+            icon: icon.map(|s| s.to_string()),
+            ..Default::default()
+        };
+        // An in-place upgrade leaves the old key behind. Whichever order the
+        // enumeration produces, the list must describe the new build.
+        for raw in [
+            vec![key("微信", "4.2.0.53", None), key("微信", "4.2.1.9", None)],
+            vec![key("微信", "4.2.1.9", None), key("微信", "4.2.0.53", None)],
+        ] {
+            let out = dedupe(raw);
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].version, "4.2.1.9");
+        }
+        // A version-less key must not displace the versioned one.
+        let out = dedupe(vec![
+            key("微信", "", Some("C:\\a.exe")),
+            key("微信", "4.2.1.9", None),
+        ]);
+        assert_eq!(out[0].version, "4.2.1.9");
+        // Same version in two keys: keep the one with a launchable icon.
+        let out = dedupe(vec![
+            key("微信", "4.2.1.9", None),
+            key("微信", "4.2.1.9", Some("C:\\a.exe")),
+        ]);
+        assert_eq!(out[0].icon.as_deref(), Some("C:\\a.exe"));
     }
 
     #[test]

@@ -6,14 +6,14 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use windows::core::HSTRING;
 
 use crate::app::{
-    AppState, BTN_H, GAP, HIT_ALL, HIT_CHECK, HIT_IGNORED_ALL, HIT_IGNORED_LIST,
+    AppState, BTN_H, CATALOG_MAX_AGE, GAP, HIT_ALL, HIT_CHECK, HIT_IGNORED_ALL, HIT_IGNORED_LIST,
     HIT_IGNORED_RESTORE, HIT_ROW, HIT_ROW_IGNORE, HIT_ROW_UPDATE, Mode, NAV_W, PAD, Payload, ROW_H,
     STATUS_H, TOP_H, WM_APP_UPDATE_DONE, WM_APP_UPDATE_PROGRESS, draw_button, in_rect, post,
 };
@@ -498,7 +498,7 @@ impl AppState {
         // The user may have just run an installer. Re-read the uninstall keys
         // before showing the count; this is a local registry scan, no network.
         self.refresh_updates_local();
-        let stale = update::now().saturating_sub(self.update_checked_at) > 6 * 3600;
+        let stale = update::now().saturating_sub(self.update_checked_at) > CATALOG_MAX_AGE;
         if stale && !self.update_checking {
             self.start_update_check();
             return;
@@ -530,6 +530,16 @@ impl AppState {
         } else {
             "安装程序已退出  ·  已刷新本机已安装软件".to_string()
         };
+        // Plenty of installers hand the work to a helper and exit at once, so
+        // the registry still holds the old version for a while (the Tencent
+        // and Lenovo wizards both do this). Re-read it a bit later instead of
+        // trusting the first look, which is how a finished upgrade stayed on
+        // the update list until the next launch.
+        self.followup_scans.clear();
+        self.followup_scans
+            .push_back(Instant::now() + Duration::from_secs(15));
+        self.followup_scans
+            .push_back(Instant::now() + Duration::from_secs(75));
         self.invalidate();
     }
 
@@ -537,7 +547,16 @@ impl AppState {
         self.inventory = Inventory::new(snap);
         self.last_local_scan = Instant::now();
         if self.update_catalog.is_empty() {
-            return false;
+            // Nothing to compare against. Showing counts from a cache that can
+            // no longer be verified is exactly how a list of already-finished
+            // updates survives; drop it and let the next check rebuild it.
+            let had = !self.updates.is_empty();
+            self.updates.clear();
+            self.update_checked_at = 0;
+            if had {
+                self.save_update_cache();
+            }
+            return had;
         }
         let items = update::rescan_with(&self.update_catalog, self.inventory.apps(), &self.ignored);
         let changed = items.len() != self.updates.len()
@@ -552,18 +571,34 @@ impl AppState {
     }
 
     pub(crate) fn start_update_check(&mut self) {
+        self.begin_update_check(true);
+    }
+
+    /// Checks kicked off by the background watchdog keep the status line the
+    /// user is reading; only the result (and only on the updates page) shows.
+    pub(crate) fn start_update_check_quiet(&mut self) {
+        self.begin_update_check(false);
+    }
+
+    fn begin_update_check(&mut self, announce: bool) {
         if self.update_checking {
             return;
         }
         if self.token.is_empty() {
-            self.status = "仍在初始化，请稍候再检查更新".into();
-            self.invalidate();
+            if announce {
+                self.status = "仍在初始化，请稍候再检查更新".into();
+                self.invalidate();
+            }
             return;
         }
         self.update_checking = true;
+        self.update_check_quiet = !announce;
+        self.last_check_attempt = Instant::now();
         self.update_progress = (0, 1);
-        self.status = "正在检查软件更新（本地比对，不上传本机软件清单）…".into();
-        self.invalidate();
+        if announce {
+            self.status = "正在检查软件更新（本地比对，不上传本机软件清单）…".into();
+            self.invalidate();
+        }
         let h = self.hwnd_usize();
         let token = self.token.clone();
         let ignored = self.ignored.clone();
@@ -585,12 +620,16 @@ impl AppState {
 
     pub(crate) fn on_update_progress(&mut self, done: usize, total: usize) {
         self.update_progress = (done, total);
-        self.status = format!("正在检查软件更新… {}/{}", done, total);
-        self.invalidate();
+        if !self.update_check_quiet {
+            self.status = format!("正在检查软件更新… {}/{}", done, total);
+            self.invalidate();
+        }
     }
 
     pub(crate) fn on_update_done(&mut self, result: Result<update::CheckResult, String>) {
         self.update_checking = false;
+        let quiet = std::mem::replace(&mut self.update_check_quiet, false);
+        let was_updates_page = self.mode == Mode::Updates;
         match result {
             Ok(r) => {
                 self.update_catalog = r.catalog;
@@ -600,9 +639,15 @@ impl AppState {
                 self.update_checked_at = update::now();
                 self.save_update_cache();
                 self.queue_icons();
-                self.status = format!("检查完成  ·  发现 {} 个可更新应用", self.updates.len());
+                if !quiet || was_updates_page {
+                    self.status = format!("检查完成  ·  发现 {} 个可更新应用", self.updates.len());
+                }
             }
-            Err(e) => self.status = format!("更新检查失败：{}", e),
+            Err(e) => {
+                if !quiet || was_updates_page {
+                    self.status = format!("更新检查失败：{}", e);
+                }
+            }
         }
         self.invalidate();
     }

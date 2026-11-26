@@ -54,6 +54,17 @@ pub const WM_APP_FRAME: u32 = 0x8000 + 16;
 /// Single 500 ms clock for caret blink and speed-graph sampling.
 pub const TIMER_ID: usize = 1;
 
+/// How often the open window re-reads the uninstall keys on its own. The walk
+/// costs a few milliseconds on a worker thread, so five minutes is cheap
+/// insurance against a list that has drifted from the machine.
+const LOCAL_SCAN_EVERY: Duration = Duration::from_secs(300);
+/// A catalog older than this cannot know about a build published this morning.
+/// Six hours matches the "stale" rule the updates page already applies.
+pub(crate) const CATALOG_MAX_AGE: u64 = 6 * 3600;
+/// Minimum gap between automatic catalog checks, so an offline machine does
+/// not retry on every timer tick.
+const CHECK_RETRY_AFTER: Duration = Duration::from_secs(600);
+
 /// A single eased scalar. Values chase their target exponentially, which is
 /// what makes hover, the navigation pill and the page slide feel continuous
 /// instead of snapping between states.
@@ -487,8 +498,18 @@ pub struct AppState {
     /// re-scans after the user installs an update.
     pub update_catalog: Vec<App>,
     pub update_checking: bool,
+    /// True while the running check was started by the background watchdog:
+    /// its progress must not overwrite the status line the user is reading.
+    pub update_check_quiet: bool,
     pub update_progress: (usize, usize),
     pub update_checked_at: u64,
+    /// Registry scans scheduled for later. Installers that hand the work to a
+    /// helper exit before their uninstall key is rewritten, so one look right
+    /// after the process ends is not enough.
+    pub(crate) followup_scans: VecDeque<Instant>,
+    /// When the last catalog check was *started*, so a failing network cannot
+    /// turn the watchdog into a request loop.
+    pub(crate) last_check_attempt: Instant,
     pub ignored: Vec<String>,
     /// Display rows for ignored updates, so the restore page has names even
     /// when the catalog has not been fetched in this session.
@@ -667,8 +688,11 @@ impl AppState {
             updates: cache.items.clone(),
             update_catalog: cache.catalog.clone(),
             update_checking: false,
+            update_check_quiet: false,
             update_progress: (0, 0),
             update_checked_at: cache.checked_at,
+            followup_scans: VecDeque::new(),
+            last_check_attempt: Instant::now(),
             ignored: cache.ignored.clone(),
             ignored_items: cache.ignored_items.clone(),
             ignored_view: false,
@@ -3251,6 +3275,7 @@ impl AppState {
                     self.caret_on = !self.caret_on;
                 }
                 self.sample_speeds();
+                self.housekeeping();
                 // Avoid repainting every other page twice a second.
                 if self.mode == Mode::Downloads || self.focus_search {
                     self.invalidate();
@@ -3266,15 +3291,8 @@ impl AppState {
                 // The user may have installed or removed something in another
                 // window. A registry walk takes tens of milliseconds, so run
                 // it off the UI thread — an Alt-Tab must never stutter.
-                if wparam.0 != 0
-                    && self.last_local_scan.elapsed() >= Duration::from_secs(2)
-                    && !LOCAL_SCAN_BUSY.swap(true, Ordering::AcqRel)
-                {
-                    let h = self.hwnd_usize();
-                    std::thread::spawn(move || {
-                        let snap = crate::installed::scan();
-                        post(h, WM_APP_LOCAL_SCAN, Payload::LocalScan(snap));
-                    });
+                if wparam.0 != 0 && self.last_local_scan.elapsed() >= Duration::from_secs(2) {
+                    self.background_local_scan();
                 }
                 None
             }
@@ -3544,6 +3562,14 @@ impl AppState {
                 // link on its worker thread, so what arrives here is usable
                 // as-is (and still round-robin mixed).
                 self.update_catalog = apps.clone();
+                // A fresh catalog carries new version numbers. Re-match the
+                // registry snapshot we already walked, so an app installed a
+                // minute ago (or a row that just published a build) appears in
+                // the update list without the user opening that page.
+                let snap = self.inventory.apps().to_vec();
+                if !snap.is_empty() {
+                    self.set_local_snapshot(snap);
+                }
                 self.home = apps.clone();
                 // On a warm start the cache is already on screen and the user
                 // may have moved on to a category, a search or a detail page.
@@ -3652,6 +3678,45 @@ impl AppState {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Registry walk on a worker thread. `LOCAL_SCAN_BUSY` keeps activation
+    /// bursts, installer exits and the watchdog from stacking walks.
+    pub(crate) fn background_local_scan(&mut self) {
+        if LOCAL_SCAN_BUSY.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let h = self.hwnd_usize();
+        std::thread::spawn(move || {
+            let snap = crate::installed::scan();
+            post(h, WM_APP_LOCAL_SCAN, Payload::LocalScan(snap));
+        });
+    }
+
+    /// Slow upkeep on the 500 ms clock. The update list has to stay true while
+    /// the window sits open: an app installed from Explorer belongs in it, and
+    /// an app whose installer just finished does not.
+    fn housekeeping(&mut self) {
+        if self
+            .followup_scans
+            .front()
+            .is_some_and(|t| Instant::now() >= *t)
+        {
+            self.followup_scans.pop_front();
+            self.background_local_scan();
+        }
+        if self.last_local_scan.elapsed() >= LOCAL_SCAN_EVERY {
+            self.background_local_scan();
+        }
+        let stale = self.update_checked_at == 0
+            || update::now().saturating_sub(self.update_checked_at) > CATALOG_MAX_AGE;
+        if stale
+            && !self.update_checking
+            && !self.token.is_empty()
+            && self.last_check_attempt.elapsed() >= CHECK_RETRY_AFTER
+        {
+            self.start_update_check_quiet();
         }
     }
 }

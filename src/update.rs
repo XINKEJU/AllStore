@@ -333,6 +333,42 @@ mod tests {
     }
 
     #[test]
+    fn an_app_installed_later_joins_the_next_local_match() {
+        // The cached catalog is reused for hours; what changes between two
+        // rescans is the machine. A freshly installed app with an older build
+        // than the catalog offers has to appear, and an up-to-date one must
+        // not.
+        let catalog = vec![
+            app("OBS Studio", "33.0.3", "obs"),
+            app("Kimi", "3.3.0", "kimi"),
+            app("Nmap", "7.991", "nmap"),
+        ];
+        let before = vec![
+            installed("OBS Studio", "33.0.3"),
+            installed("Nmap", "7.991"),
+        ];
+        assert!(match_updates(&catalog, &before).is_empty());
+
+        let after = vec![
+            installed("OBS Studio", "33.0.3"),
+            installed("Nmap", "7.991"),
+            installed("Kimi", "3.2.24"),
+        ];
+        let out = match_updates(&catalog, &after);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].soft_id, "kimi");
+        assert_eq!(out[0].current, "3.2.24");
+    }
+
+    #[test]
+    fn an_empty_catalog_never_produces_rows() {
+        // Without a catalog the local match has nothing to compare against;
+        // the caller drops the cached list rather than keeping it as truth.
+        let local = vec![installed("微信", "4.2.0.53")];
+        assert!(rescan_with(&[], &local, &[]).is_empty());
+    }
+
+    #[test]
     fn stale_duplicate_keys_do_not_report_an_update() {
         // The machine has Git 2.56.1 plus a leftover "GitHub 1.0" key that
         // used to match "Git" and kept it in the list forever.

@@ -681,8 +681,19 @@ pub fn search_local(list: &[App], keyword: &str) -> Vec<App> {
     if kw.is_empty() {
         return Vec::new();
     }
+    // The catalog is not consistent about language: Chrome's stable channel is
+    // filed as "谷歌浏览器 稳定版（64位）" next to a "Google Chrome Canary" row.
+    // A plain substring test finds the second and misses the first, so the
+    // same alias rules that decide "is this app installed" get a second pass.
+    let norm_kw = crate::installed::normalize(keyword);
     list.iter()
-        .filter(|a| a.name.to_lowercase().contains(&kw))
+        .filter(|a| {
+            a.name.to_lowercase().contains(&kw)
+                || (!norm_kw.is_empty() && {
+                    let n = crate::installed::normalize(&a.name);
+                    crate::installed::matches_normalized(&n, &norm_kw)
+                })
+        })
         .cloned()
         .collect()
 }
@@ -1384,10 +1395,19 @@ mod tests {
             app("谷歌浏览器 稳定版", "https://a/1.exe"),
             app("Chrome Beta", "https://a/2.exe"),
             app("微信", "https://a/3.exe"),
+            app("GitHub Desktop", "https://a/4.exe"),
         ];
-        assert_eq!(search_local(&list, "chrome").len(), 1);
+        // Both rows answer to "chrome": the Chinese name normalizes to
+        // "google chrome", and the alias rule matches on the word boundary.
+        assert_eq!(search_local(&list, "chrome").len(), 2);
+        assert_eq!(search_local(&list, "CHROME").len(), 2);
         assert_eq!(search_local(&list, "浏览").len(), 1);
         assert_eq!(search_local(&list, "   ").len(), 0);
+        // Typing is not the same question as "is this app installed": a
+        // partial word is meant to widen the result ("git" should surface
+        // GitHub Desktop), so the substring rule stays ahead of the alias
+        // rule here.
+        assert_eq!(search_local(&list, "git").len(), 1);
     }
 
     #[test]

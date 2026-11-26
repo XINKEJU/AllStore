@@ -12,7 +12,10 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmFlush, DwmSetWindowAttribute};
-use windows::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient, UpdateWindow, ValidateRect};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    ScreenToClient, UpdateWindow, ValidateRect,
+};
 use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
 use windows::Win32::UI::Shell::ITaskbarList3;
@@ -227,8 +230,12 @@ pub(crate) const HERO_H: f32 = 88.0;
 /// few DIPs below the banner's bottom edge (TOP_H + 14 + HERO_H) so a clipped
 /// card can never peek through the banner's rounded corners.
 pub(crate) const LIST_TOP: f32 = TOP_H + HERO_H + 18.0;
-pub(crate) const MIN_W: i32 = 1000;
-pub(crate) const MIN_H: i32 = 620;
+/// Smallest window the grid still reads at. The old 1000x620 was in DIPs, so
+/// a 125 % laptop with 1100 physical pixels could not fit the window at all:
+/// the right edge — download and update buttons — sat off screen. 860 DIPs
+/// (1075 px at 125 %) fits that panel and still leaves two card columns.
+pub(crate) const MIN_W: i32 = 860;
+pub(crate) const MIN_H: i32 = 560;
 
 // Detail page: the hero band and the scrolling body are separate regions.
 // Keeping these as tokens makes it impossible for a progress bar to be drawn
@@ -434,6 +441,10 @@ pub struct AppState {
     pub list_title: String,
     pub search: Vec<u16>,
     pub focus_search: bool,
+    /// The visible list is a local filter of the catalog, not a result set
+    /// from the search endpoint. Clearing the box (or pressing Esc) restores
+    /// the landing page instead of leaving the filtered rows behind.
+    pub search_preview: bool,
     /// UTF-16 index of the insertion point (not simply "end of string").
     pub search_caret: usize,
     /// Ctrl+A selection; the next keystroke replaces the whole query.
@@ -652,6 +663,7 @@ impl AppState {
             list_title: "推荐应用".into(),
             search: Vec::new(),
             focus_search: false,
+            search_preview: false,
             search_caret: 0,
             search_select_all: false,
             caret_on: true,
@@ -782,6 +794,61 @@ impl AppState {
         self.high_surrogate = None;
     }
 
+    /// Filter the in-memory catalog as the user types.
+    ///
+    /// Searching used to happen only on Enter, so a typo cost a network round
+    /// trip and the box looked dead until then. The catalog is already
+    /// resident, and one substring pass over ~850 names costs far less than a
+    /// millisecond, which is cheap enough for every keystroke.
+    ///
+    /// The pool is `home`, not `catalog_all`: the latter holds whatever the
+    /// open page displays, so searching from a category page would silently
+    /// miss everything outside that category.
+    fn preview_search(&mut self) {
+        // Not tied to focus: a background catalog refresh has to be able to
+        // re-filter the list even after the box lost focus.
+        if self.field.is_some() {
+            return;
+        }
+        let kw = self.search_text();
+        let kw = kw.trim().to_string();
+        if kw.is_empty() {
+            if self.search_preview {
+                self.search_preview = false;
+                if !self.home.is_empty() {
+                    self.set_apps(self.home.clone(), "推荐应用");
+                }
+            }
+            return;
+        }
+        let pool: &[App] = if self.home.is_empty() {
+            &self.catalog_all
+        } else {
+            &self.home
+        };
+        let hits = crate::source::search_local(pool, &kw);
+        let n = hits.len();
+        self.search_preview = true;
+        self.apps = hits;
+        // One synthetic entry keeps the chip row honest ("全部源 17")
+        // without listing per-source counts that would describe the whole
+        // catalog instead of what is on screen.
+        self.sources.clear();
+        self.source_counts.clear();
+        self.source_counts.push(n);
+        self.source_filter = None;
+        self.list_title = format!("搜索：{}", kw);
+        self.mode = Mode::Browse;
+        self.loading = false;
+        self.set_scroll(0);
+        self.status = if n == 0 {
+            format!("本地目录没有「{}」  ·  按回车联网搜索", kw)
+        } else {
+            format!("本地匹配 {} 个  ·  按回车联网搜索更多", n)
+        };
+        self.invalidate();
+    }
+
     /// Start of the UTF-16 character before `at` (never splits a surrogate).
     fn prev_boundary(units: &[u16], at: usize) -> usize {
         if at == 0 {
@@ -816,6 +883,7 @@ impl AppState {
         }
         Self::edit_insert(&mut self.search, &mut self.search_caret, text);
         self.caret_on = true;
+        self.preview_search();
         self.invalidate();
     }
 
@@ -828,6 +896,7 @@ impl AppState {
             Self::edit_backspace(&mut self.search, &mut self.search_caret);
         }
         self.caret_on = true;
+        self.preview_search();
         self.invalidate();
     }
 
@@ -840,6 +909,7 @@ impl AppState {
             Self::edit_delete(&mut self.search, &mut self.search_caret);
         }
         self.caret_on = true;
+        self.preview_search();
         self.invalidate();
     }
 
@@ -1543,6 +1613,9 @@ impl AppState {
 
     pub(crate) fn do_search(&mut self) {
         self.search_select_all = false;
+        // The remote answer replaces the local preview; typing again starts a
+        // fresh preview rather than mixing the two lists.
+        self.search_preview = false;
         let kw = self.search_text().trim().to_string();
         if kw.is_empty() {
             self.select_nav(0);
@@ -3343,8 +3416,24 @@ impl AppState {
                     let mm = lparam.0 as *mut MINMAXINFO;
                     if !mm.is_null() {
                         let s = self.gfx.scale.max(1.0);
-                        (*mm).ptMinTrackSize.x = (MIN_W as f32 * s) as i32;
-                        (*mm).ptMinTrackSize.y = (MIN_H as f32 * s) as i32;
+                        let mut min_w = (MIN_W as f32 * s).round() as i32;
+                        let mut min_h = (MIN_H as f32 * s).round() as i32;
+                        // On a 125 % panel the layout minimum can be wider
+                        // than the screen itself, and a window that cannot
+                        // shrink to fit leaves its right edge — the download
+                        // and update buttons — off screen. Cap the floor at
+                        // the work area so the window always fits.
+                        let mon = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST);
+                        let mut mi = MONITORINFO {
+                            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                            ..Default::default()
+                        };
+                        if GetMonitorInfoW(mon, &mut mi).as_bool() {
+                            min_w = min_w.min(mi.rcWork.right - mi.rcWork.left);
+                            min_h = min_h.min(mi.rcWork.bottom - mi.rcWork.top);
+                        }
+                        (*mm).ptMinTrackSize.x = min_w;
+                        (*mm).ptMinTrackSize.y = min_h;
                     }
                 }
                 Some(LRESULT(0))
@@ -3444,12 +3533,36 @@ impl AppState {
                             self.search_select_all = true;
                             self.invalidate();
                         }
+                        27 => {
+                            // Esc leaves search entirely. Clearing the buffer
+                            // matters: leaving text in a box while the page
+                            // below shows the whole catalog reads as a bug.
+                            self.search.clear();
+                            self.search_caret = 0;
+                            self.search_select_all = false;
+                            if self.search_preview {
+                                self.search_preview = false;
+                                if !self.home.is_empty() {
+                                    self.set_apps(self.home.clone(), "推荐应用");
+                                }
+                            }
+                            self.blur_search();
+                            self.invalidate();
+                        }
                         86 if ctrl => self.paste_text(),
                         _ => {}
                     }
                     return Some(LRESULT(0));
                 }
                 if self.field_key(key) {
+                    return Some(LRESULT(0));
+                }
+                // Ctrl+F reaches the search box from anywhere in the catalog,
+                // which is the shortcut every browser and store uses.
+                if ctrl && key == 70 && matches!(self.mode, Mode::Browse | Mode::Detail) {
+                    self.focus_search = true;
+                    self.caret_on = true;
+                    self.invalidate();
                     return Some(LRESULT(0));
                 }
                 // Page navigation shares the wheel's eased target, so a long
@@ -3579,6 +3692,12 @@ impl AppState {
                     self.active_nav == 0 && self.mode == Mode::Browse && self.search.is_empty();
                 if on_home {
                     self.set_apps(apps, "推荐应用");
+                } else if self.search_preview {
+                    // The preview is derived from `home`, so it has to be
+                    // recomputed against the catalog that just arrived.
+                    // Recomputing the source chips instead would label the
+                    // filtered rows with counts for all 852 apps.
+                    self.preview_search();
                 } else {
                     self.recompute_sources();
                     self.status = format!("目录已刷新 · 共 {} 款应用", n);

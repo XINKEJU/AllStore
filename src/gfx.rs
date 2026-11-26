@@ -378,9 +378,9 @@ impl Gfx {
     /// Largest square a logo is ever drawn at, in physical pixels.
     ///
     /// The detail hero shows a 96 DIP icon and cards use 64 DIP, so a fixed
-    /// 128 px decode was ~2.7x the pixels needed on a 100% display (29 KB of
-    /// BGRA per bitmap, ~400 cached → ~11 MB held for nothing). Scaling the cap
-    /// with the window DPI keeps the same sharpness and drops the waste.
+    /// 128 px decode carried 1.8x the pixels of the largest draw on a 100%
+    /// display (29 KB of BGRA per bitmap wasted, ~400 cached → ~11 MB). Scaling
+    /// the cap with the window DPI keeps the same sharpness and drops the waste.
     pub fn icon_cap_px(&self) -> u32 {
         icon_cap_for(self.scale)
     }

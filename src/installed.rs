@@ -207,35 +207,63 @@ pub fn scan() -> Vec<Installed> {
     out
 }
 
-/// Lowercase alphanumerics only, with common marketing suffixes stripped.
+/// Lowercase alphanumerics with single spaces kept as word boundaries, plus
+/// the marketing suffixes store catalogues love to append.
+///
+/// Keeping the space matters: "git" must not look like a prefix of "github",
+/// while "python" still has to match "Python 3.15.0 (64-bit)" — the only way
+/// to tell those apart is to know where one word ends.
 pub fn normalize(s: &str) -> String {
     let mut out = String::new();
+    let mut gap = false;
     for c in s.chars() {
         if c.is_alphanumeric() {
+            if gap && !out.is_empty() {
+                out.push(' ');
+            }
+            gap = false;
             for l in c.to_lowercase() {
                 out.push(l);
             }
+        } else if !out.is_empty() {
+            gap = true;
         }
     }
-    const SUFFIXES: [&str; 12] = [
+    // Longest first, so "windows 版" is removed before the bare "版".
+    const SUFFIXES: [&str; 25] = [
+        "智慧办公软件",
+        "稳定版",
+        "腾讯 ai 工作台",
+        "windows 版",
         "windows版",
-        "pc版",
+        "电脑版",
         "桌面版",
         "官方版",
         "正式版",
         "最新版",
         "中文版",
+        "免费版",
+        "标准版",
+        "64 位",
+        "32 位",
         "64位",
         "32位",
+        "pc 版",
+        "pc版",
+        "64 bit",
+        "32 bit",
+        "windows",
+        "client",
         "x64",
         "x86",
-        "client",
     ];
     loop {
         let mut changed = false;
         for suf in SUFFIXES {
-            if out.len() > suf.len() && out.ends_with(suf) {
-                out.truncate(out.len() - suf.len());
+            let t = out.trim_end();
+            if t.len() > suf.len() && t.ends_with(suf) {
+                out.truncate(t.len() - suf.len());
+                out = out.trim_end().to_string();
                 changed = true;
             }
         }
@@ -243,11 +271,23 @@ pub fn normalize(s: &str) -> String {
             break;
         }
     }
+    // The catalogue often uses the Chinese product name while the uninstall
+    // key keeps the English one; without this "谷歌浏览器 稳定版" never
+    // matches "Google Chrome".
+    if out.contains("谷歌浏览器") {
+        out = out.replace("谷歌浏览器", "google chrome");
+    }
     out
 }
 
-/// Conservative name match: exact after normalization, or a contained name
-/// that is long enough to avoid short-name false positives.
+/// Conservative name match: exact after normalization, a word-boundary
+/// suffix ("Chrome" vs "Google Chrome"), or a version-qualified prefix
+/// ("Python" vs "python 3 15 0").
+///
+/// A plain substring rule used to stand here, and it was too eager in both
+/// directions: "Git" matched the leftover `GitHub 1.0` uninstall key and got
+/// reported as outdated forever, while "Python 3.15.0 (64-bit)" was rejected
+/// as a match for "Python". Both bugs show up as a wrong update list.
 /// Kept for tests; production callers normalize once and use
 /// [`matches_normalized`] directly.
 #[cfg(test)]
@@ -266,7 +306,20 @@ pub fn matches_normalized(a: &str, b: &str) -> bool {
         return true;
     }
     let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-    long.contains(short) && short.chars().count() >= 3 && short.len() * 2 >= long.len()
+    // "chrome" is the trailing words of "google chrome".
+    if long.ends_with(short)
+        && long.len() > short.len()
+        && long.as_bytes()[long.len() - short.len() - 1] == b' '
+    {
+        return true;
+    }
+    // "python" qualifies "python 3 15 0": a bare word may only extend with a
+    // version, never with another product name such as "hub" or "canary".
+    if let Some(rest) = long.strip_prefix(short) {
+        let rest = rest.trim_start();
+        return !rest.is_empty() && rest.starts_with(|c: char| c.is_ascii_digit());
+    }
+    false
 }
 
 /// Numeric version segments. `suffix` records that parsing stopped at a
@@ -559,6 +612,33 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(launch_path(&bogus), None);
+    }
+
+    #[test]
+    fn matching_stops_at_word_boundaries() {
+        // A stale uninstall key must not impersonate a different product.
+        assert!(!name_matches("Git", "GitHub"));
+        assert!(!name_matches("Git", "GitHub-Store"));
+        assert!(!name_matches("Google Chrome", "Google Chrome Canary"));
+        assert!(!name_matches("Google Chrome Canary", "Google Chrome"));
+        assert!(!name_matches("微信", "微信输入法"));
+        assert!(!name_matches("微信", "微信开发者工具"));
+        assert!(!name_matches("微信", "微信分身大师"));
+    }
+
+    #[test]
+    fn matching_accepts_version_and_marketing_variants() {
+        assert!(name_matches("Git", "Git"));
+        assert!(name_matches("Python", "Python 3.15.0 (64-bit)"));
+        assert!(name_matches("微信", "微信电脑版"));
+        assert!(name_matches("企业微信", "企业微信 - 智慧办公软件"));
+        assert!(name_matches("ima", "ima - 腾讯 AI 工作台"));
+        assert!(name_matches("Google Chrome", "Chrome"));
+        assert!(name_matches("谷歌浏览器 稳定版（64位）", "Google Chrome"));
+        assert!(name_matches(
+            "Visual Studio Code",
+            "Microsoft Visual Studio Code"
+        ));
     }
 
     #[test]

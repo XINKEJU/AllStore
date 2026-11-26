@@ -4,7 +4,6 @@
 //! then matched against the registry inventory entirely on this machine.
 //! No local application name is ever sent to the server.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -134,13 +133,21 @@ pub fn rescan_with(catalog: &[App], local: &[Installed], ignored: &[String]) -> 
 
 /// Pure function so the matching rules can be exercised without network or
 /// registry access.
+///
+/// Two directions of ambiguity are resolved here, and both used to produce a
+/// wrong list:
+///
+/// * one catalog row can match several uninstall keys (`Git` next to a stale
+///   `GitHub 1.0` entry, `Google Chrome` next to `Google Chrome Canary`) — the
+///   highest local version wins, otherwise the leftover key reports the app as
+///   forever outdated;
+/// * one local app can match several catalog rows (`微信` and `微信电脑版`, a
+///   Tencent 3.9 entry next to a Lenovo 4.2.1.9) — only the newest catalog row
+///   is kept, otherwise the same product shows up twice.
 pub fn match_updates(catalog: &[App], local: &[Installed]) -> Vec<UpdateItem> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
     // Normalizing both names on every comparison would allocate ~255k short
     // strings for 150 installed apps × 850 catalog rows on the UI thread each
-    // time the update list is rebuilt. Normalize once per row and use the
-    // allocation-free comparator instead; the rule is identical.
+    // time the update list is rebuilt. Normalize once per row instead.
     let local_norm: Vec<String> = local
         .iter()
         .map(|l| installed::normalize(&l.name))
@@ -149,10 +156,15 @@ pub fn match_updates(catalog: &[App], local: &[Installed]) -> Vec<UpdateItem> {
         .iter()
         .map(|a| installed::normalize(&a.name))
         .collect();
+
+    // Best catalog row for each local app: the highest version among the rows
+    // whose name matches.
+    let mut best_for_local: Vec<Option<usize>> = vec![None; local.len()];
     for (li, l) in local.iter().enumerate() {
-        // The catalog can contain several entries for one product; pick the
-        // highest version instead of whichever happens to come first.
-        let mut best: Option<&App> = None;
+        if l.version.trim().is_empty() {
+            continue;
+        }
+        let mut best: Option<usize> = None;
         for (ci, a) in catalog.iter().enumerate() {
             let Some(v) = a.version.as_deref() else {
                 continue;
@@ -162,24 +174,52 @@ pub fn match_updates(catalog: &[App], local: &[Installed]) -> Vec<UpdateItem> {
             {
                 continue;
             }
-            let better = best
-                .and_then(|b| b.version.as_deref())
-                .is_none_or(|old| installed::is_newer(v, old));
+            let better = match best.and_then(|b| catalog[b].version.as_deref()) {
+                Some(old) => installed::is_newer(v, old),
+                None => true,
+            };
             if better {
-                best = Some(a);
+                best = Some(ci);
             }
         }
-        let Some(a) = best else {
+        best_for_local[li] = best;
+    }
+
+    // Group by catalog row, keeping the newest local version seen for it.
+    struct Group<'a> {
+        row: usize,
+        current: &'a str,
+    }
+    let mut groups: Vec<Group> = Vec::new();
+    for (li, picked) in best_for_local.iter().enumerate() {
+        let Some(ci) = *picked else { continue };
+        let version = local[li].version.trim();
+        match groups.iter_mut().find(|g| g.row == ci) {
+            Some(g) => {
+                if installed::is_newer(version, g.current) {
+                    g.current = version;
+                }
+            }
+            None => groups.push(Group {
+                row: ci,
+                current: version,
+            }),
+        }
+    }
+
+    let mut out = Vec::new();
+    for g in groups {
+        let a = &catalog[g.row];
+        let Some(latest) = a.version.clone() else {
             continue;
         };
-        let latest = a.version.clone().unwrap_or_default();
-        if !installed::is_newer(&latest, &l.version) || !seen.insert(a.id.clone()) {
+        if !installed::is_newer(&latest, g.current) {
             continue;
         }
         out.push(UpdateItem {
             soft_id: a.id.clone(),
             name: a.name.clone(),
-            current: l.version.clone(),
+            current: g.current.to_string(),
             latest,
             size: a.size.clone(),
             logo: a.logo_url().map(str::to_string),
@@ -293,6 +333,30 @@ mod tests {
     }
 
     #[test]
+    fn stale_duplicate_keys_do_not_report_an_update() {
+        // The machine has Git 2.56.1 plus a leftover "GitHub 1.0" key that
+        // used to match "Git" and kept it in the list forever.
+        let catalog = vec![app("Git", "2.56.1", "git")];
+        let local = vec![installed("Git", "2.56.1"), installed("GitHub", "1.0")];
+        assert!(match_updates(&catalog, &local).is_empty());
+    }
+
+    #[test]
+    fn one_local_app_uses_the_newest_catalog_row() {
+        // Tencent still lists 微信 3.9 while Lenovo lists 微信电脑版 4.2.1.9;
+        // an installed 4.2.0.13 must be compared against the newest row only.
+        let catalog = vec![
+            app("微信", "3.9", "tencent"),
+            app("微信电脑版", "4.2.1.9", "lenovo"),
+        ];
+        let local = vec![installed("微信", "4.2.0.13")];
+        let out = match_updates(&catalog, &local);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].soft_id, "lenovo");
+        assert_eq!(out[0].latest, "4.2.1.9");
+    }
+
+    #[test]
     fn unignore_removes_the_id_and_its_display_row() {
         let mut ignored = vec!["1".to_string(), "2".to_string()];
         let mut items = vec![
@@ -337,6 +401,24 @@ mod tests {
         assert_eq!(c.ignored, vec!["7".to_string()]);
         assert!(c.ignored_items.is_empty());
         assert!(c.catalog.is_empty());
+    }
+
+    /// Diagnostic against the real registry and the cached catalog.
+    #[test]
+    #[ignore = "reads the local registry and the cached catalog"]
+    fn diag_local_cache() {
+        let cache = load_cache();
+        let local = installed::scan();
+        let items = match_updates(&cache.catalog, &local);
+        println!(
+            "{} updates from {} catalog rows, {} local keys",
+            items.len(),
+            cache.catalog.len(),
+            local.len()
+        );
+        for i in &items {
+            println!("  {} : {} -> {}", i.name, i.current, i.latest);
+        }
     }
 
     /// Diagnostic for the real update check. Run with `cargo test -- --ignored`.

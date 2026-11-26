@@ -2350,7 +2350,9 @@ impl AppState {
             let track_top = TOP_H + 8.0;
             let track_h = (footer_top - 8.0 - track_top).max(1.0);
             let total = (content - TOP_H).max(1.0);
-            let thumb_h = (track_h * track_h / total).clamp(24.0, track_h);
+            // `track_h` shrinks with the window; clamping to a 24 px minimum
+            // would panic on a very short one (min > max).
+            let thumb_h = (track_h * track_h / total).clamp(track_h.min(24.0), track_h);
             let ty = track_top + (track_h - thumb_h) * (self.nav_scroll / self.nav_scroll_max);
             self.gfx.round(
                 gfx::rect(NAV_W - 5.0, ty, NAV_W - 2.0, ty + thumb_h),
